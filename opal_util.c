@@ -64,6 +64,32 @@ struct Level0DiscoveryTPerFeature {
 };
 
 /*
+    • Feature Code = 0x0002
+    • Version = 0x1 or any version that supports the defined features in this SSC
+    • Length = 0x0C
+    • MBR Done = **
+    • MBR Enabled = **
+    • Media Encryption = 1
+    • Locked = **
+    • Locking Enabled = See 3.1.1.3.1
+    • Locking Supported = 1
+*/
+struct Level0DiscoveryLockingFeature {
+    uint16_t feature_code;
+    uint8_t reserved_1 : 4;
+    uint8_t version : 4;
+    uint8_t length;
+    uint8_t locking_supported : 1;
+    uint8_t locking_enabled : 1;
+    uint8_t locked : 1;
+    uint8_t media_encryption : 1;
+    uint8_t MBR_enabled : 1;
+    uint8_t MBR_done : 1;
+    uint8_t reserved_2 : 2;
+    uint8_t reserved_3[11];
+};
+
+/*
     An Opal SSC compliant Storage Device SHALL return the following:
     • Feature Code = 0x0203
     • Feature Descriptor Version Number = 0x2 or any version that supports the defined features in this SSC
@@ -119,7 +145,10 @@ int main(int argc, char **argv)
         struct identify_controller_data response = { 0 };
         struct nvme_admin_cmd cmd = { 0 };
 
+        // https://nvmexpress.org/wp-content/uploads/NVM-Express-Base-Specification-2.0b-2021.12.18-Ratified.pdf
+        // Figure 138
         cmd.opcode = 0x06;
+        // 5.17, Figure 273
         cmd.cdw10 = 1;
         cmd.data_len = 239; // for some reason, 240 and more writes way too many bytes
         cmd.addr = (unsigned long long)&response;
@@ -135,11 +164,21 @@ int main(int argc, char **argv)
 
     // discovery 0
     {
-        unsigned char response[2048] = { 0 };
+        unsigned char response[4096] = { 0 };
         struct nvme_admin_cmd cmd = { 0 };
 
+        // structure of IF-RECV described in
+        // https://nvmexpress.org/wp-content/uploads/NVM-Express-Base-Specification-2.0b-2021.12.18-Ratified.pdf
+        // 5.25
         cmd.opcode = 0x82;
-        cmd.cdw10 = 0x1000100;
+        // SPC-5 ... -> https://trustedcomputinggroup.org/wp-content/uploads/TCG_Storage_Architecture_Core_Spec_v2.01_r1.00.pdf
+        // https://trustedcomputinggroup.org/wp-content/uploads/TCG_Storage_SIIS_v1p10_r1p29_pub_14nov2021.pdf
+        // Table 22
+        // protocol comID up comID lo reserved
+        // 00000001 00000000 00000001 00000000
+        // https://trustedcomputinggroup.org/wp-content/uploads/TCG_Storage_Architecture_Core_Spec_v2.01_r1.00.pdf
+        // 3.3.6 Level 0 Discovery
+        cmd.cdw10 = 0x01000100; // protocol 0x01, comid 0x0001
         cmd.cdw11 = sizeof(response);
         cmd.data_len = sizeof(response);
         cmd.addr = (unsigned long long)&response;
@@ -170,6 +209,9 @@ int main(int argc, char **argv)
                        body->version, body->comID_mgmt_supported, body->streaming_supported,
                        body->buffer_mgmt_supported, body->ack_nack_supported, body->async_supported,
                        body->sync_supported);
+            } else if (feature_code == 0x0002) {
+                struct Level0DiscoveryLockingFeature *feature = (void *)response + offset;
+                printf("%i %i\n", feature->media_encryption, feature->locking_supported);
             } else if (feature_code == 0x0203) {
                 struct Level0DiscoveryOpal2Feature *body = (void *)response + offset;
                 printf("Opal 2 feature:\n"
