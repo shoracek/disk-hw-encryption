@@ -1,17 +1,26 @@
 #include <linux/nvme_ioctl.h>
 #include <linux/fscrypt.h>
+#include <linux/hdreg.h>
 #include <sys/random.h>
 #include <sys/ioctl.h>
+#include <arpa/inet.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <scsi/sg.h>
 #include <unistd.h>
 #include <string.h>
 #include <assert.h>
 #include <stdlib.h>
+#include <malloc.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <errno.h>
+
+#define ATA_TRUSTED_RECEIVE 0x5c
+#define ATA_TRUSTED_SEND 0x5e
+#define TCG_LEVEL_0_DISCOVERY_PROTOCOL_ID 0x01
+#define TCG_LEVEL_0_DISCOVERY_COMID 0x0001
 
 struct identify_controller_data {
     char vid[2];
@@ -36,9 +45,9 @@ struct Level0DiscoverySharedFeature {
 };
 
 /*
-    An Opal SSC compliant SD SHALL return the following:
+    An Opal SSC compliant SD SHALL return the followi
     • Feature Code = 0x0001
-    • Version = 0x1 or any version that supports the defined features in this SSC
+    • Version = 0x1 or any version that supports the
     • Length = 0x0C
     • ComID Mgmt Supported = VU
     • Streaming Supported = 1
@@ -109,6 +118,7 @@ struct Level0DiscoveryLockingFeature {
     • Number of Locking SP User Authorities = 8 or larger
     • Initial C_PIN_SID PIN Indicator = VU
 */
+
 #pragma pack(1)
 struct Level0DiscoveryOpal2Feature {
     struct Level0DiscoverySharedFeature shared;
@@ -212,11 +222,103 @@ void tcg_discovery_0_process_feature(void *data, int feature_code)
     }
 }
 
-int tcg_discovery_0(int fd)
+void tcg_discovery_0_process_response(void *data)
+{
+    struct Level0DiscoveryHeader *header = data;
+    uint32_t offset = sizeof(struct Level0DiscoveryHeader);
+    uint32_t total_length = swap_endian_32(header->length);
+
+    while (offset < total_length) {
+        struct Level0DiscoverySharedFeature *body = data + offset;
+        uint32_t feature_code = swap_endian_16(body->feature_code);
+
+        tcg_discovery_0_process_feature(body, feature_code);
+
+        offset += body->length + sizeof(struct Level0DiscoverySharedFeature);
+    }
+}
+
+int sata_trusted(int fd, uint8_t *response, size_t response_len, int send, int cmd, int protocol, int comID)
+{
+    // https://wiki.osdev.org/ATA_Command_Matrix
+    // https://en.wikipedia.org/wiki/SCSI_command#List_of_SCSI_commands
+    // -> ATA PASS-THROUGH(12) -> ATA Command Pass-Through
+    // https://www.t10.org/ftp/t10/document.04/04-262r8.pdf
+    struct CDB_ATA_PASS_THROUGH {
+        uint8_t operation_code; // = 0xa1
+        uint8_t reserved_1 : 1;
+        uint8_t protocol : 4;
+        uint8_t multiple_count : 3;
+        uint8_t t_length : 2;
+        uint8_t byt_blok : 1;
+        uint8_t t_dir : 1;
+        uint8_t reserved_2 : 1;
+        uint8_t ck_cond : 1;
+        uint8_t off_line : 1;
+        union {
+            struct {
+                uint8_t features;
+                uint8_t sector_count;
+                uint8_t lba_low;
+                uint8_t lba_mid;
+                uint8_t lba_high;
+                uint8_t device;
+                uint8_t command;
+            } original;
+            // https://people.freebsd.org/~imp/asiabsdcon2015/works/d2161r5-ATAATAPI_Command_Set_-_3.pdf
+            struct {
+                uint8_t security_protocol;
+                uint16_t transfer_length;
+                uint16_t sp_specific;
+                // uint8_t reserved_1 : 4; ??????? why are there extra 4 bits???????
+                uint8_t reserved_2 : 4;
+                uint8_t transport_dependent : 1;
+                uint8_t obsolete_1 : 1;
+                uint8_t na : 1;
+                uint8_t obsolete_2 : 1;
+                uint8_t command;
+            } trusted_receive;
+        };
+        uint8_t reserved_3;
+        uint8_t control;
+    };
+
+    struct CDB_ATA_PASS_THROUGH cdb = {
+        .operation_code = 0xa1,
+        // https://people.freebsd.org/~imp/asiabsdcon2015/works/d2161r5-ATAATAPI_Command_Set_-_3.pdf
+        // Table 140 — TRUSTED RECEIVE command inputs
+        // file:///home/shoracek/Downloads/d1532v2r4b-ATA-ATAPI-7-2.pdf
+        .protocol = cmd == ATA_TRUSTED_RECEIVE ? 4 : 5, // PIO Data-In/Out
+        .t_dir = cmd == ATA_TRUSTED_RECEIVE ? 1 : 0,
+        .byt_blok = 1, // -> t_length contains number of blocks to transfer (bytes are waaaaay too slow)
+        .t_length = 2, // -> transfer length in sector_count/trusted_receive.transfer_length
+        .trusted_receive.security_protocol = protocol,
+        .trusted_receive.transfer_length = response_len / 4096,
+        .trusted_receive.sp_specific = comID,
+        .trusted_receive.command = cmd,
+    };
+
+    sg_io_hdr_t sg = {
+        .interface_id = 'S',
+        .dxfer_direction = cmd == ATA_TRUSTED_RECEIVE ? SG_DXFER_FROM_DEV : SG_DXFER_TO_DEV,
+        .cmdp = (void *)&cdb,
+        .cmd_len = sizeof(cdb),
+        .dxferp = response,
+        .dxfer_len = response_len,
+        .timeout = 10000,
+        // todo: figure out sense
+    };
+
+    if (ioctl(fd, SG_IO, &sg) < 0) {
+        printf("bad ioctl %s\n", strerror(errno));
+    }
+}
+
+int nvme_send(int fd, unsigned char *response, size_t response_len)
 {
     int err = 0;
     // discovery 0
-    unsigned char response[4096] = { 0 };
+
     struct nvme_admin_cmd cmd = { 0 };
 
     // structure of IF-RECV described in
@@ -230,370 +332,16 @@ int tcg_discovery_0(int fd)
     // 00000001 00000000 00000001 00000000
     // https://trustedcomputinggroup.org/wp-content/uploads/TCG_Storage_Architecture_Core_Spec_v2.01_r1.00.pdf
     // 3.3.6 Level 0 Discovery
-    cmd.cdw10 = 0x01000100; // protocol 0x01, comid 0x0001
-    cmd.cdw11 = sizeof(response);
-    cmd.data_len = sizeof(response);
+    cmd.cdw10 = 0x01000000 | 0x000100; // protocol 0x01, comid 0x0001
+    cmd.cdw11 = response_len;
+    cmd.data_len = response_len;
     cmd.addr = (unsigned long long)&response;
 
     err = ioctl(fd, NVME_IOCTL_ADMIN_CMD, &cmd);
     if (err != 0)
         printf("ioctl error %s 0x%02x\n", strerror(errno), err);
 
-    struct Level0DiscoveryHeader *header = (void *)response;
-    uint32_t offset = sizeof(struct Level0DiscoveryHeader);
-    uint32_t total_length = swap_endian_32(header->length);
-    printf("total length: %i, offset %i\n", total_length, offset);
-    while (offset < total_length) {
-        struct Level0DiscoverySharedFeature *body = (void *)response + offset;
-        uint32_t feature_code = swap_endian_16(body->feature_code);
-
-        tcg_discovery_0_process_feature(body, feature_code);
-
-        offset += body->length + sizeof(struct Level0DiscoverySharedFeature);
-    }
     return err;
-}
-
-#define TINY_ATOM_TOKEN(S, V) (uint8_t)(0b0 << 7 | S << 6 | V)
-#define SHORT_ATOM_TOKEN_1(S, V) (uint8_t)(0b10 << 6 | S << 5 | V)
-#define MEDIUM_ATOM_TOKEN_1(S, V) (uint8_t)(0b110 << 5 | S << 4 | V >> 8)
-#define MEDIUM_ATOM_TOKEN_2(S, V) (uint8_t)(V)
-#define START_LIST_TOKEN 0xf0
-#define END_LIST_TOKEN 0xf1
-#define START_NAME_TOKEN 0xf2
-#define END_NAME_TOKEN 0xf3
-#define CALL_TOKEN 0xf8
-#define END_OF_DATA_TOKEN 0xf9
-
-void start_list(unsigned char *buffer, size_t *i)
-{
-    buffer[*i] = 0xf0;
-    *i += 1;
-}
-
-void end_list(unsigned char *buffer, size_t *i)
-{
-    buffer[*i] = 0xf1;
-    *i += 1;
-}
-
-void start_name_list(unsigned char *buffer, size_t *i)
-{
-    buffer[*i] = 0xf2;
-    *i += 1;
-}
-
-void end_name_list(unsigned char *buffer, size_t *i)
-{
-    buffer[*i] = 0xf3;
-    *i += 1;
-}
-
-void call_token(unsigned char *buffer, size_t *i)
-{
-    buffer[*i] = 0xf8;
-    *i += 1;
-}
-
-void end_of_data(unsigned char *buffer, size_t *i)
-{
-    buffer[*i] = 0xf9;
-    *i += 1;
-}
-
-void method_status_list(unsigned char *buffer, size_t *i)
-{
-    buffer[*i] = 0xf0;
-    *i += 1;
-
-    *i += 3;
-
-    buffer[*i] = 0xf1;
-    *i += 1;
-}
-
-void tiny_atom(unsigned char *buffer, size_t *i, unsigned char S, unsigned char V)
-{
-    buffer[*i] = 0b0 << 7 | S << 6 | V;
-    *i += 1;
-}
-
-void short_atom(unsigned char *buffer, size_t *i, unsigned char S, unsigned char *V, size_t V_len)
-{
-    buffer[*i] = 0b10 << 6 | S << 5 | V_len;
-    *i += 1;
-
-    memcpy(buffer + *i, V, V_len);
-    *i += V_len;
-}
-
-void medium_atom(unsigned char *buffer, size_t *i, unsigned char S, unsigned char *V, size_t V_len)
-{
-    buffer[*i] = 0b110 << 5 | S << 4 | V_len >> 8;
-    buffer[*i + 1] = 0b11111111 & V_len;
-    *i += 2;
-
-    memcpy(buffer + *i, V, V_len);
-    *i += V_len;
-}
-
-#define SMUID "\x00\x00\x00\x00\x00\x00\x00\xff"
-#define SMUID_LEN 8
-
-int get(unsigned char *buffer, size_t *i, unsigned char *invoking_id, size_t invoking_id_len)
-{
-    /*
-        TableUID.Get [
-        ObjectUID.Get [
-        Cellblock : cell_block ]
-        =>
-        [ Result : typeOr { Bytes : bytes, RowValues : list [ ColumnNumber = Value ... ] } ]
-    */
-
-    // Data Payload
-    call_token(buffer, i);
-    // Invoking UID
-    short_atom(buffer, i, 1, invoking_id, invoking_id_len);
-    // Method UID (Table 241) - Get
-    short_atom(buffer, i, 1, "\x00\x00\x00\x06\x00\x00\x00\x16", 8);
-    // [
-    start_list(buffer, i);
-    {
-        start_list(buffer, i);
-        {
-            // startColumn
-            if (1) {
-                start_name_list(buffer, i);
-                {
-                    tiny_atom(buffer, i, 0, 3);
-                    tiny_atom(buffer, i, 0, 3);
-                }
-                end_name_list(buffer, i);
-            }
-            // endColumn
-            if (1) {
-                start_name_list(buffer, i);
-                {
-                    tiny_atom(buffer, i, 0, 4);
-                    tiny_atom(buffer, i, 0, 3);
-                }
-                end_name_list(buffer, i);
-            }
-        }
-        end_list(buffer, i);
-    }
-    // ]
-    end_list(buffer, i);
-    end_of_data(buffer, i);
-    method_status_list(buffer, i);
-
-    *i += 4 - (*i % 4); // padding
-}
-
-int start_session(unsigned char *buffer, size_t *i, unsigned char *SPID, size_t SPID_len, unsigned char *host_challenge,
-                  size_t host_challenge_len, unsigned char *host_exchange_authority, size_t host_exchange_authority_len,
-                  unsigned char *host_signing_authority, size_t host_signing_authority_len)
-{
-    /*
-        5.2.3.1 StartSession Method
-        SMUID.StartSession [
-        HostSessionID : uinteger,
-        SPID : uidref {SPObjectUID},
-        Write : boolean,
-        HostChallenge = bytes,
-        HostExchangeAuthority = uidref {AuthorityObjectUID},
-        HostExchangeCert = bytes,
-        HostSigningAuthority = uidref {AuthorityObjectUID},
-        HostSigningCert = bytes,
-        SessionTimeout = uinteger,
-        TransTimeout = uinteger,
-        InitialCredit = uinteger,
-        SignedHash = bytes ]
-        =>
-        SMUID.SyncSession [ see SyncSession definition in 5.2.3.2]
-    */
-
-    // Data Payload
-    call_token(buffer, i);
-    // Session Manager UID
-    short_atom(buffer, i, 1, SMUID, SMUID_LEN);
-    // Method UID (Table 241) - StartSession
-    short_atom(buffer, i, 1, "\x00\x00\x00\x00\x00\x00\xff\x02", 8);
-    // [
-    start_list(buffer, i);
-    {
-        // HostSessionID : uinteger,
-        tiny_atom(buffer, i, 0, 1);
-        // SPID : uidref {SPObjectUID},
-        short_atom(buffer, i, 1, SPID, SPID_len);
-        // Write : boolean,
-        tiny_atom(buffer, i, 0, 1);
-        // HostChallenge = bytes,
-        if (host_challenge) {
-            start_name_list(buffer, i);
-            {
-                tiny_atom(buffer, i, 0, 0);
-                medium_atom(buffer, i, 1, host_challenge, host_challenge_len);
-            }
-            end_name_list(buffer, i);
-        }
-        // HostExchangeAuthority = uidref {AuthorityObjectUID},
-        if (host_exchange_authority) {
-            start_name_list(buffer, i);
-            {
-                tiny_atom(buffer, i, 0, 1);
-                medium_atom(buffer, i, 1, host_exchange_authority, host_exchange_authority_len);
-            }
-            end_name_list(buffer, i);
-        }
-        // HostExchangeCert = bytes,
-        // HostSigningAuthority = uidref {AuthorityObjectUID},
-        if (host_signing_authority) {
-            start_name_list(buffer, i);
-            {
-                tiny_atom(buffer, i, 0, 3);
-                short_atom(buffer, i, 1, host_signing_authority, host_signing_authority_len);
-            }
-            end_name_list(buffer, i);
-        }
-        // HostSigningCert = bytes,
-        // SessionTimeout = uinteger,
-        // TransTimeout = uinteger,
-        // InitialCredit = uinteger,
-        // SignedHash = bytes
-    }
-    // ]
-    end_list(buffer, i);
-    end_of_data(buffer, i);
-    method_status_list(buffer, i);
-
-    *i += 4 - (*i % 4); // padding
-}
-
-struct ComPacket {
-    uint8_t reserved_1[4];
-    uint16_t comid;
-    uint16_t comid_extension;
-    uint32_t outstanding_data;
-    uint32_t min_transfer;
-    uint32_t length;
-};
-
-struct Packet {
-    uint64_t session;
-    uint32_t seq_number;
-    uint8_t reserved_1[2];
-    uint16_t ack_type;
-    uint32_t ack;
-    uint32_t length;
-};
-
-struct DataSubPacket {
-    uint8_t reserved_1[6];
-    uint16_t kind;
-    uint32_t length;
-};
-
-void send_packet(const unsigned char *buffer, size_t buffer_len)
-{
-    printf("%i:\n", buffer_len);
-    for (int j = 0; j < buffer_len; ++j) {
-        printf("%02x ", buffer[j]);
-    }
-    printf("\n");
-}
-
-int todo_todo2()
-{
-    printf("hello world\n");
-
-    // Activating the Locking SP
-    unsigned char buffer[2048];
-    size_t i;
-    struct ComPacket *com_packet;
-    struct Packet *packet;
-    struct DataSubPacket *data_subpacket;
-
-    // StartSession
-    memset(buffer, 0, sizeof(buffer));
-    i = 0;
-
-    com_packet = (void *)(((unsigned char *)buffer) + i);
-    com_packet->comid = swap_endian_16(0x07fe);
-    i += sizeof(struct ComPacket);
-
-    packet = (void *)(((unsigned char *)buffer) + i);
-    i += sizeof(struct Packet);
-
-    data_subpacket = (void *)(((unsigned char *)buffer) + i);
-    i += sizeof(struct DataSubPacket);
-
-    start_session(buffer, &i, "\x00\x00\x02\x05\x00\x00\x00\x01", 8,
-                  "\x3c\x6e\x65\x77\x5f\x53\x49\x44\x5f\x70\x61\x73\x73\x77\x6f\x72\x64\x3e", 18, NULL, 0,
-                  "\x00\x00\x00\x09\x00\x00\x00\x06", 8);
-
-    com_packet->length = swap_endian_32(i - sizeof(struct ComPacket));
-    packet->length = swap_endian_32(swap_endian_32(com_packet->length) - sizeof(struct Packet));
-    data_subpacket->length = swap_endian_32(swap_endian_32(packet->length) - sizeof(struct DataSubPacket) - 3);
-
-    send_packet(buffer, i);
-}
-
-int todo_take_ownership()
-{
-    printf("hello world\n");
-
-    // Taking ownership of the storage device
-    unsigned char buffer[2048];
-    size_t i;
-    struct ComPacket *com_packet;
-    struct Packet *packet;
-    struct DataSubPacket *data_subpacket;
-
-    // StartSession
-    memset(buffer, 0, sizeof(buffer));
-    i = 0;
-
-    com_packet = (void *)(((unsigned char *)buffer) + i);
-    com_packet->comid = swap_endian_16(0x07fe);
-    i += sizeof(struct ComPacket);
-
-    packet = (void *)(((unsigned char *)buffer) + i);
-    i += sizeof(struct Packet);
-
-    data_subpacket = (void *)(((unsigned char *)buffer) + i);
-    i += sizeof(struct DataSubPacket);
-
-    start_session(buffer, &i, "\x00\x00\x02\x05\x00\x00\x00\x01", 8, NULL, 0, NULL, 0, NULL, 0);
-
-    com_packet->length = swap_endian_32(i - sizeof(struct ComPacket));
-    packet->length = swap_endian_32(swap_endian_32(com_packet->length) - sizeof(struct Packet));
-    data_subpacket->length = swap_endian_32(swap_endian_32(packet->length) - sizeof(struct DataSubPacket) - 3);
-
-    send_packet(buffer, i);
-
-    // SyncSession
-    memset(buffer, 0, sizeof(buffer));
-    i = 0;
-
-    com_packet = (void *)(((unsigned char *)buffer) + i);
-    com_packet->comid = swap_endian_16(0x07fe);
-    i += sizeof(struct ComPacket);
-
-    packet = (void *)(((unsigned char *)buffer) + i);
-    packet->session = swap_endian_64(0x00001001LL << 32 | 0x0000001);
-    i += sizeof(struct Packet);
-
-    data_subpacket = (void *)(((unsigned char *)buffer) + i);
-    i += sizeof(struct DataSubPacket);
-
-    get(buffer, &i, "\x00\x00\x00\x0B\x00\x00\x84\x02", 8);
-
-    com_packet->length = swap_endian_32(i - sizeof(struct ComPacket));
-    packet->length = swap_endian_32(swap_endian_32(com_packet->length) - sizeof(struct Packet));
-    data_subpacket->length = swap_endian_32(swap_endian_32(packet->length) - sizeof(struct DataSubPacket) - 3);
-
-    send_packet(buffer, i);
 }
 
 int main(int argc, char **argv)
@@ -605,14 +353,19 @@ int main(int argc, char **argv)
         fd = open(argv[2], O_RDONLY | O_CLOEXEC);
         return nvme_identify(fd);
     } else if (strcmp(argv[1], "discovery") == 0) {
-        fd = open(argv[2], O_RDONLY | O_CLOEXEC);
-        return tcg_discovery_0(fd);
-    } else if (strcmp(argv[1], "todo") == 0) {
-        return todo_take_ownership();
-        // return todo_todo2();
+        fd = open(argv[2], O_RDWR);
+        if (fd < 0)
+            printf("open error\n");
+
+        uint8_t response[4096] = { 0 };
+
+        sata_trusted(fd, response, sizeof(response), 0, ATA_TRUSTED_RECEIVE, TCG_LEVEL_0_DISCOVERY_PROTOCOL_ID,
+                     TCG_LEVEL_0_DISCOVERY_COMID);
+        tcg_discovery_0_process_response(response);
+
+        return 0;
     } else {
         printf("invalid command\n");
-
         return 1;
     }
 
