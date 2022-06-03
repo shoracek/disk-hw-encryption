@@ -45,9 +45,9 @@ struct Level0DiscoverySharedFeature {
 };
 
 /*
-    An Opal SSC compliant SD SHALL return the followi
+    An Opal SSC compliant SD SHALL return the following:
     • Feature Code = 0x0001
-    • Version = 0x1 or any version that supports the
+    • Version = 0x1 or any version that supports the defined features in this SSC
     • Length = 0x0C
     • ComID Mgmt Supported = VU
     • Streaming Supported = 1
@@ -344,6 +344,350 @@ int nvme_send(int fd, unsigned char *response, size_t response_len)
     return err;
 }
 
+
+#define TINY_ATOM_TOKEN(S, V) (uint8_t)(0b0 << 7 | S << 6 | V)
+#define SHORT_ATOM_TOKEN_1(S, V) (uint8_t)(0b10 << 6 | S << 5 | V)
+#define MEDIUM_ATOM_TOKEN_1(S, V) (uint8_t)(0b110 << 5 | S << 4 | V >> 8)
+#define MEDIUM_ATOM_TOKEN_2(S, V) (uint8_t)(V)
+#define START_LIST_TOKEN 0xf0
+#define END_LIST_TOKEN 0xf1
+#define START_NAME_TOKEN 0xf2
+#define END_NAME_TOKEN 0xf3
+#define CALL_TOKEN 0xf8
+#define END_OF_DATA_TOKEN 0xf9
+
+void start_list(unsigned char *buffer, size_t *i)
+{
+    buffer[*i] = 0xf0;
+    *i += 1;
+}
+
+void end_list(unsigned char *buffer, size_t *i)
+{
+    buffer[*i] = 0xf1;
+    *i += 1;
+}
+
+void start_name_list(unsigned char *buffer, size_t *i)
+{
+    buffer[*i] = 0xf2;
+    *i += 1;
+}
+
+void end_name_list(unsigned char *buffer, size_t *i)
+{
+    buffer[*i] = 0xf3;
+    *i += 1;
+}
+
+void call_token(unsigned char *buffer, size_t *i)
+{
+    buffer[*i] = 0xf8;
+    *i += 1;
+}
+
+void end_of_data(unsigned char *buffer, size_t *i)
+{
+    buffer[*i] = 0xf9;
+    *i += 1;
+}
+
+void method_status_list(unsigned char *buffer, size_t *i)
+{
+    buffer[*i] = 0xf0;
+    *i += 1;
+
+    *i += 3;
+
+    buffer[*i] = 0xf1;
+    *i += 1;
+}
+
+void tiny_atom(unsigned char *buffer, size_t *i, unsigned char S, unsigned char V)
+{
+    buffer[*i] = 0b0 << 7 | S << 6 | V;
+    *i += 1;
+}
+
+void short_atom(unsigned char *buffer, size_t *i, unsigned char S, unsigned char *V, size_t V_len)
+{
+    buffer[*i] = 0b10 << 6 | S << 5 | V_len;
+    *i += 1;
+
+    memcpy(buffer + *i, V, V_len);
+    *i += V_len;
+}
+
+void medium_atom(unsigned char *buffer, size_t *i, unsigned char S, unsigned char *V, size_t V_len)
+{
+    buffer[*i] = 0b110 << 5 | S << 4 | V_len >> 8;
+    buffer[*i + 1] = 0b11111111 & V_len;
+    *i += 2;
+
+    memcpy(buffer + *i, V, V_len);
+    *i += V_len;
+}
+
+#define SMUID "\x00\x00\x00\x00\x00\x00\x00\xff"
+#define SMUID_LEN 8
+
+int get(unsigned char *buffer, size_t *i, unsigned char *invoking_id, size_t invoking_id_len)
+{
+    /*
+        TableUID.Get [
+        ObjectUID.Get [
+        Cellblock : cell_block ]
+        =>
+        [ Result : typeOr { Bytes : bytes, RowValues : list [ ColumnNumber = Value ... ] } ]
+    */
+
+    // Data Payload
+    call_token(buffer, i);
+    // Invoking UID
+    short_atom(buffer, i, 1, invoking_id, invoking_id_len);
+    // Method UID (Table 241) - Get
+    short_atom(buffer, i, 1, "\x00\x00\x00\x06\x00\x00\x00\x16", 8);
+    // [
+    start_list(buffer, i);
+    {
+        start_list(buffer, i);
+        {
+            // startColumn
+            if (1) {
+                start_name_list(buffer, i);
+                {
+                    tiny_atom(buffer, i, 0, 3);
+                    tiny_atom(buffer, i, 0, 3);
+                }
+                end_name_list(buffer, i);
+            }
+            // endColumn
+            if (1) {
+                start_name_list(buffer, i);
+                {
+                    tiny_atom(buffer, i, 0, 4);
+                    tiny_atom(buffer, i, 0, 3);
+                }
+                end_name_list(buffer, i);
+            }
+        }
+        end_list(buffer, i);
+    }
+    // ]
+    end_list(buffer, i);
+    end_of_data(buffer, i);
+    method_status_list(buffer, i);
+
+    *i += 4 - (*i % 4); // padding
+}
+
+int start_session(unsigned char *buffer, size_t *i, unsigned char *SPID, size_t SPID_len, unsigned char *host_challenge,
+                  size_t host_challenge_len, unsigned char *host_exchange_authority, size_t host_exchange_authority_len,
+                  unsigned char *host_signing_authority, size_t host_signing_authority_len)
+{
+    /*
+        5.2.3.1 StartSession Method
+        SMUID.StartSession [
+        HostSessionID : uinteger,
+        SPID : uidref {SPObjectUID},
+        Write : boolean,
+        HostChallenge = bytes,
+        HostExchangeAuthority = uidref {AuthorityObjectUID},
+        HostExchangeCert = bytes,
+        HostSigningAuthority = uidref {AuthorityObjectUID},
+        HostSigningCert = bytes,
+        SessionTimeout = uinteger,
+        TransTimeout = uinteger,
+        InitialCredit = uinteger,
+        SignedHash = bytes ]
+        =>
+        SMUID.SyncSession [ see SyncSession definition in 5.2.3.2]
+    */
+
+    // Data Payload
+    call_token(buffer, i);
+    // Session Manager UID
+    short_atom(buffer, i, 1, SMUID, SMUID_LEN);
+    // Method UID (Table 241) - StartSession
+    short_atom(buffer, i, 1, "\x00\x00\x00\x00\x00\x00\xff\x02", 8);
+    // [
+    start_list(buffer, i);
+    {
+        // HostSessionID : uinteger,
+        tiny_atom(buffer, i, 0, 1);
+        // SPID : uidref {SPObjectUID},
+        short_atom(buffer, i, 1, SPID, SPID_len);
+        // Write : boolean,
+        tiny_atom(buffer, i, 0, 1);
+        // HostChallenge = bytes,
+        if (host_challenge) {
+            start_name_list(buffer, i);
+            {
+                tiny_atom(buffer, i, 0, 0);
+                medium_atom(buffer, i, 1, host_challenge, host_challenge_len);
+            }
+            end_name_list(buffer, i);
+        }
+        // HostExchangeAuthority = uidref {AuthorityObjectUID},
+        if (host_exchange_authority) {
+            start_name_list(buffer, i);
+            {
+                tiny_atom(buffer, i, 0, 1);
+                medium_atom(buffer, i, 1, host_exchange_authority, host_exchange_authority_len);
+            }
+            end_name_list(buffer, i);
+        }
+        // HostExchangeCert = bytes,
+        // HostSigningAuthority = uidref {AuthorityObjectUID},
+        if (host_signing_authority) {
+            start_name_list(buffer, i);
+            {
+                tiny_atom(buffer, i, 0, 3);
+                short_atom(buffer, i, 1, host_signing_authority, host_signing_authority_len);
+            }
+            end_name_list(buffer, i);
+        }
+        // HostSigningCert = bytes,
+        // SessionTimeout = uinteger,
+        // TransTimeout = uinteger,
+        // InitialCredit = uinteger,
+        // SignedHash = bytes
+    }
+    // ]
+    end_list(buffer, i);
+    end_of_data(buffer, i);
+    method_status_list(buffer, i);
+
+    *i += 4 - (*i % 4); // padding
+}
+
+struct ComPacket {
+    uint8_t reserved_1[4];
+    uint16_t comid;
+    uint16_t comid_extension;
+    uint32_t outstanding_data;
+    uint32_t min_transfer;
+    uint32_t length;
+};
+
+struct Packet {
+    uint64_t session;
+    uint32_t seq_number;
+    uint8_t reserved_1[2];
+    uint16_t ack_type;
+    uint32_t ack;
+    uint32_t length;
+};
+
+struct DataSubPacket {
+    uint8_t reserved_1[6];
+    uint16_t kind;
+    uint32_t length;
+};
+
+void send_packet(const unsigned char *buffer, size_t buffer_len)
+{
+    printf("%i:\n", buffer_len);
+    for (int j = 0; j < buffer_len; ++j) {
+        printf("%02x ", buffer[j]);
+    }
+    printf("\n");
+}
+
+int todo_todo2()
+{
+    printf("hello world\n");
+
+    // Activating the Locking SP
+    unsigned char buffer[2048];
+    size_t i;
+    struct ComPacket *com_packet;
+    struct Packet *packet;
+    struct DataSubPacket *data_subpacket;
+
+    // StartSession
+    memset(buffer, 0, sizeof(buffer));
+    i = 0;
+
+    com_packet = (void *)(((unsigned char *)buffer) + i);
+    com_packet->comid = swap_endian_16(0x07fe);
+    i += sizeof(struct ComPacket);
+
+    packet = (void *)(((unsigned char *)buffer) + i);
+    i += sizeof(struct Packet);
+
+    data_subpacket = (void *)(((unsigned char *)buffer) + i);
+    i += sizeof(struct DataSubPacket);
+
+    start_session(buffer, &i, "\x00\x00\x02\x05\x00\x00\x00\x01", 8,
+                  "\x3c\x6e\x65\x77\x5f\x53\x49\x44\x5f\x70\x61\x73\x73\x77\x6f\x72\x64\x3e", 18, NULL, 0,
+                  "\x00\x00\x00\x09\x00\x00\x00\x06", 8);
+
+    com_packet->length = swap_endian_32(i - sizeof(struct ComPacket));
+    packet->length = swap_endian_32(swap_endian_32(com_packet->length) - sizeof(struct Packet));
+    data_subpacket->length = swap_endian_32(swap_endian_32(packet->length) - sizeof(struct DataSubPacket) - 3);
+
+    send_packet(buffer, i);
+}
+
+int todo_take_ownership()
+{
+    printf("hello world\n");
+
+    // Taking ownership of the storage device
+    unsigned char buffer[2048];
+    size_t i;
+    struct ComPacket *com_packet;
+    struct Packet *packet;
+    struct DataSubPacket *data_subpacket;
+
+    // StartSession
+    memset(buffer, 0, sizeof(buffer));
+    i = 0;
+
+    com_packet = (void *)(((unsigned char *)buffer) + i);
+    com_packet->comid = swap_endian_16(0x07fe);
+    i += sizeof(struct ComPacket);
+
+    packet = (void *)(((unsigned char *)buffer) + i);
+    i += sizeof(struct Packet);
+
+    data_subpacket = (void *)(((unsigned char *)buffer) + i);
+    i += sizeof(struct DataSubPacket);
+
+    start_session(buffer, &i, "\x00\x00\x02\x05\x00\x00\x00\x01", 8, NULL, 0, NULL, 0, NULL, 0);
+
+    com_packet->length = swap_endian_32(i - sizeof(struct ComPacket));
+    packet->length = swap_endian_32(swap_endian_32(com_packet->length) - sizeof(struct Packet));
+    data_subpacket->length = swap_endian_32(swap_endian_32(packet->length) - sizeof(struct DataSubPacket) - 3);
+
+    send_packet(buffer, i);
+
+    // SyncSession
+    memset(buffer, 0, sizeof(buffer));
+    i = 0;
+
+    com_packet = (void *)(((unsigned char *)buffer) + i);
+    com_packet->comid = swap_endian_16(0x07fe);
+    i += sizeof(struct ComPacket);
+
+    packet = (void *)(((unsigned char *)buffer) + i);
+    packet->session = swap_endian_64(0x00001001LL << 32 | 0x0000001);
+    i += sizeof(struct Packet);
+
+    data_subpacket = (void *)(((unsigned char *)buffer) + i);
+    i += sizeof(struct DataSubPacket);
+
+    get(buffer, &i, "\x00\x00\x00\x0B\x00\x00\x84\x02", 8);
+
+    com_packet->length = swap_endian_32(i - sizeof(struct ComPacket));
+    packet->length = swap_endian_32(swap_endian_32(com_packet->length) - sizeof(struct Packet));
+    data_subpacket->length = swap_endian_32(swap_endian_32(packet->length) - sizeof(struct DataSubPacket) - 3);
+
+    send_packet(buffer, i);
+}
+
+
 int main(int argc, char **argv)
 {
     int err = 0;
@@ -364,8 +708,12 @@ int main(int argc, char **argv)
         tcg_discovery_0_process_response(response);
 
         return 0;
+    } else if (strcmp(argv[1], "todo") == 0) {
+        return todo_take_ownership();
+        // return todo_todo2();
     } else {
         printf("invalid command\n");
+
         return 1;
     }
 
