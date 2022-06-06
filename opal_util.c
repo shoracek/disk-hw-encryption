@@ -22,6 +22,12 @@
 #define TCG_LEVEL_0_DISCOVERY_PROTOCOL_ID 0x01
 #define TCG_LEVEL_0_DISCOVERY_COMID 0x0001
 
+#define METHOD_UID_START_SESSION "\x00\x00\x00\x00\x00\x00\xff\x02"
+#define SMUID "\x00\x00\x00\x00\x00\x00\x00\xff"
+#define SMUID_LEN 8
+#define LOCKING_SP_UID "\x00\x00\x02\x05\x00\x00\x00\x02"
+#define ADMIN1_UID "\x00\x00\x00\x09\x00\x01\x00\x01"
+
 struct identify_controller_data {
     char vid[2];
     char ssvid[2];
@@ -238,8 +244,10 @@ void tcg_discovery_0_process_response(void *data)
     }
 }
 
-int sata_trusted(int fd, uint8_t *response, size_t response_len, int send, int cmd, int protocol, int comID)
+int ata_trusted(int fd, uint8_t *response, size_t response_len, int cmd, int protocol, int comID)
 {
+    send_packet(response, response_len);
+
     // https://wiki.osdev.org/ATA_Command_Matrix
     // https://en.wikipedia.org/wiki/SCSI_command#List_of_SCSI_commands
     // -> ATA PASS-THROUGH(12) -> ATA Command Pass-Through
@@ -297,6 +305,7 @@ int sata_trusted(int fd, uint8_t *response, size_t response_len, int send, int c
         .trusted_receive.sp_specific = comID,
         .trusted_receive.command = cmd,
     };
+    uint8_t sense[32] = {0};
 
     sg_io_hdr_t sg = {
         .interface_id = 'S',
@@ -306,12 +315,27 @@ int sata_trusted(int fd, uint8_t *response, size_t response_len, int send, int c
         .dxferp = response,
         .dxfer_len = response_len,
         .timeout = 10000,
+
+            .mx_sb_len = sizeof (sense),
+    .sbp = sense,
+
         // todo: figure out sense
     };
 
     if (ioctl(fd, SG_IO, &sg) < 0) {
         printf("bad ioctl %s\n", strerror(errno));
     }
+
+    printf("sense:\n");
+    for (int i = 0 ; i < sizeof(sense); ++i) {
+        printf("%02x ", sense[i]);
+    }
+printf("\n");
+    if (!((0x00 == sense[0]) && (0x00 == sense[1])))
+        if (!((0x72 == sense[0]) && (0x0b == sense[1])))  printf("NOK\n"); // not ATA response
+    printf ("ok: %02x\n", sense[11]);
+    send_packet(response, response_len);
+
 }
 
 int nvme_send(int fd, unsigned char *response, size_t response_len)
@@ -332,6 +356,7 @@ int nvme_send(int fd, unsigned char *response, size_t response_len)
     // 00000001 00000000 00000001 00000000
     // https://trustedcomputinggroup.org/wp-content/uploads/TCG_Storage_Architecture_Core_Spec_v2.01_r1.00.pdf
     // 3.3.6 Level 0 Discovery
+
     cmd.cdw10 = 0x01000000 | 0x000100; // protocol 0x01, comid 0x0001
     cmd.cdw11 = response_len;
     cmd.data_len = response_len;
@@ -343,7 +368,6 @@ int nvme_send(int fd, unsigned char *response, size_t response_len)
 
     return err;
 }
-
 
 #define TINY_ATOM_TOKEN(S, V) (uint8_t)(0b0 << 7 | S << 6 | V)
 #define SHORT_ATOM_TOKEN_1(S, V) (uint8_t)(0b10 << 6 | S << 5 | V)
@@ -428,9 +452,6 @@ void medium_atom(unsigned char *buffer, size_t *i, unsigned char S, unsigned cha
     *i += V_len;
 }
 
-#define SMUID "\x00\x00\x00\x00\x00\x00\x00\xff"
-#define SMUID_LEN 8
-
 int get(unsigned char *buffer, size_t *i, unsigned char *invoking_id, size_t invoking_id_len)
 {
     /*
@@ -509,7 +530,7 @@ int start_session(unsigned char *buffer, size_t *i, unsigned char *SPID, size_t 
     // Session Manager UID
     short_atom(buffer, i, 1, SMUID, SMUID_LEN);
     // Method UID (Table 241) - StartSession
-    short_atom(buffer, i, 1, "\x00\x00\x00\x00\x00\x00\xff\x02", 8);
+    short_atom(buffer, i, 1, METHOD_UID_START_SESSION, 8);
     // [
     start_list(buffer, i);
     {
@@ -687,34 +708,79 @@ int todo_take_ownership()
     send_packet(buffer, i);
 }
 
+void ata_discovery(int fd)
+{
+    uint8_t response[4096] = { 0 };
+    ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, TCG_LEVEL_0_DISCOVERY_PROTOCOL_ID,
+                TCG_LEVEL_0_DISCOVERY_COMID);
+    tcg_discovery_0_process_response(response);
+}
+
+void unlock_range(int fd)
+{
+    // Taking ownership of the storage device
+    size_t i;
+    struct ComPacket *com_packet;
+    struct Packet *packet;
+    struct DataSubPacket *data_subpacket;
+
+    printf("hello world\n");
+    unsigned char buffer[10000];
+    memset(buffer, 0, sizeof(buffer));
+    i=2048;
+
+    ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, 0x1);
+
+
+    // StartSession
+    memset(buffer, 0, sizeof(buffer));
+    i = 0;
+
+    com_packet = (void *)(((unsigned char *)buffer) + i);
+    com_packet->comid = swap_endian_16(0x7ffe);
+    i += sizeof(struct ComPacket);
+
+    packet = (void *)(((unsigned char *)buffer) + i);
+    i += sizeof(struct Packet);
+
+    data_subpacket = (void *)(((unsigned char *)buffer) + i);
+    i += sizeof(struct DataSubPacket);
+
+    start_session(buffer, &i, LOCKING_SP_UID, 8, "password", 8, NULL, 0, ADMIN1_UID, 8);
+
+i = 512;
+    com_packet->length = swap_endian_32(i - sizeof(struct ComPacket));
+    packet->length = swap_endian_32(swap_endian_32(com_packet->length) - sizeof(struct Packet));
+    data_subpacket->length = swap_endian_32(swap_endian_32(packet->length) - sizeof(struct DataSubPacket) - 3);
+
+    ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, 0x7ffe);
+}
 
 int main(int argc, char **argv)
 {
     int err = 0;
-    int fd;
+    int fd = 0;
+
+    if (argc == 3) {
+        fd = open(argv[2], O_RDWR);
+    }
 
     if (strcmp(argv[1], "identify") == 0) {
-        fd = open(argv[2], O_RDONLY | O_CLOEXEC);
         return nvme_identify(fd);
     } else if (strcmp(argv[1], "discovery") == 0) {
-        fd = open(argv[2], O_RDWR);
-        if (fd < 0)
-            printf("open error\n");
-
-        uint8_t response[4096] = { 0 };
-
-        sata_trusted(fd, response, sizeof(response), 0, ATA_TRUSTED_RECEIVE, TCG_LEVEL_0_DISCOVERY_PROTOCOL_ID,
-                     TCG_LEVEL_0_DISCOVERY_COMID);
-        tcg_discovery_0_process_response(response);
-
-        return 0;
+        ata_discovery(fd);
     } else if (strcmp(argv[1], "todo") == 0) {
-        return todo_take_ownership();
-        // return todo_todo2();
+        // return todo_take_ownership();
+    } else if (strcmp(argv[1], "unlock") == 0) {
+	// unlock_range(fd);
     } else {
         printf("invalid command\n");
 
-        return 1;
+        err = 1;
+    }
+
+    if (argc == 3) {
+        close(fd);
     }
 
     return err;
