@@ -853,6 +853,8 @@ void unlock_range(int fd)
     struct ComPacket *com_packet;
     struct Packet *packet;
     struct DataSubPacket *data_subpacket;
+    uint64_t HostSessionID = 0;
+uint64_t SPSessionID = 0;
 
     printf("Unlock range:\n");
     unsigned char buffer[10000] = {0};
@@ -864,144 +866,98 @@ void unlock_range(int fd)
     printf("baseCOMID = %x\n", base_comID);
     printf("\n");
 
-    // SetParameters
-    memset(buffer, 0, sizeof(buffer));
-    memset(response, 0, sizeof(response));
-    i = 0;
-
-    prepare_headers(buffer, &i, 0, 0);
-    
-    memcpy(buffer, "\x00\x00\x00\x00\x7f\xfe\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xb0\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x98\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x8c\xf8\xa8\x00\x00\x00\x00\x00\x00\x00\xff\xa8\x00\x00\x00\x00\x00\x00\xff\x01\xf0\xf2\x00\xf0\xf2\xd0\x10\x4d\x61\x78\x43\x6f\x6d\x50\x61\x63\x6b\x65\x74\x53\x69\x7a\x65\x82\x08\x00\xf3\xf2\xad\x4d\x61\x78\x50\x61\x63\x6b\x65\x74\x53\x69\x7a\x65\x82\x07\xec\xf3\xf2\xaf\x4d\x61\x78\x49\x6e\x64\x54\x6f\x6b\x65\x6e\x53\x69\x7a\x65\x82\x07\xc8\xf3\xf2\xaa\x4d\x61\x78\x50\x61\x63\x6b\x65\x74\x73\x01\xf3\xf2\xad\x4d\x61\x78\x53\x75\x62\x70\x61\x63\x6b\x65\x74\x73\x01\xf3\xf2\xaa\x4d\x61\x78\x4d\x65\x74\x68\x6f\x64\x73\x01\xf3\xf1\xf3\xf1\xf9\xf0\x00\x00\x00\xf1", 196);
-    i = 512;
-
-    finish_headers(buffer, &i);
-
-    printf("\nSending SetParameters:\n");
-    ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
-    printf("\n");
-
-
-    printf("\nGetting SetParameters:\n");
-    com_packet = response;
-    do  {
-        memset(response, 0, sizeof(response));
-        msleep(20);
-        ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
-    } while ((0 != com_packet->outstanding_data) && (0 == com_packet->min_transfer));
-    printf("\n");
-
-
     // StartSession
-    memset(buffer, 0, sizeof(buffer));
-    memset(response, 0, sizeof(response));
-    i = 0;
+    {
+        memset(buffer, 0, sizeof(buffer));
+        i = 0;
 
-    prepare_headers(buffer, &i, 0, 0);
+        printf("\nSending StartSession:\n");
+        prepare_headers(buffer, &i, SPSessionID, HostSessionID);
+        start_session(buffer, &i, LOCKING_SP_UID, 8, "\xc1\xef\x2a\xaa\xf6\xa6\xac\x7b\xd9\x79\x1c\xdb\x64\xf3\xac\x2a\x4f\x42\x96\xdd\xb4\x4f\x29\x98\x20\x87\xb7\xb3\xd8\xba\xa2\xa9", 32, NULL, 0, ADMIN1_UID, 8);
+        finish_headers(buffer, &i);
 
-    start_session(buffer, &i, LOCKING_SP_UID, 8, "\xc1\xef\x2a\xaa\xf6\xa6\xac\x7b\xd9\x79\x1c\xdb\x64\xf3\xac\x2a\x4f\x42\x96\xdd\xb4\x4f\x29\x98\x20\x87\xb7\xb3\xd8\xba\xa2\xa9", 32, NULL, 0, ADMIN1_UID, 8);
+        ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
 
-    finish_headers(buffer, &i);
-
-    // i = 512;
-    printf("\nSending StartSession:\n");
-    ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
-    printf("\n");
-
-    printf("\nGetting SyncSession:\n");
-    com_packet = response;
-    do  {
+        printf("\nGetting SyncSession:\n");
         memset(response, 0, sizeof(response));
-        msleep(20);
-        ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
-    } while ((0 != com_packet->outstanding_data) && (0 == com_packet->min_transfer));
-    printf("\n");
+        com_packet = response;
+        do  {
+            memset(response, 0, sizeof(response));
+            msleep(20);
+            ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
+        } while ((0 != com_packet->outstanding_data) && (0 == com_packet->min_transfer));
+        printf("\n");
 
-    i = 0;
-    com_packet = (void *)(((unsigned char *)response) + i);
-    i += sizeof(struct ComPacket);
-    packet = (void *)(((unsigned char *)response) + i);
-    i += sizeof(struct Packet);
-    data_subpacket = (void *)(((unsigned char *)response) + i);
-    i += sizeof(struct DataSubPacket);
+        i = 0;
+        com_packet = (void *)(((unsigned char *)response) + i);
+        i += sizeof(struct ComPacket);
+        packet = (void *)(((unsigned char *)response) + i);
+        i += sizeof(struct Packet);
+        data_subpacket = (void *)(((unsigned char *)response) + i);
+        i += sizeof(struct DataSubPacket);
 
-    i += 1; // call token
-    i += 1; // short atom
-    i += 8; // invoking uid
-    i += 1; // short atom
-    i += 8; // method uid
-    i += 1; // start list token
-    uint64_t HostSessionID = swap_endian_32(parse_int(response, &i));
-    uint64_t SPSessionID = swap_endian_32(parse_int(response, &i));
-    printf("HostSessionID: %x,  SPSessionID: %x \n", HostSessionID, SPSessionID);
-    i += 1; // end list token
-    i += 1; // end of data token
-    // method status list
-    printf("method status code: %s (%i)\n", MSC_to_string(response[i + 1]), response[i + 1]);
-    i += 5;
-
-
-
+        i += 1; // call token
+        i += 1; // short atom
+        i += 8; // invoking uid
+        i += 1; // short atom
+        i += 8; // method uid
+        i += 1; // start list token
+        HostSessionID = swap_endian_32(parse_int(response, &i));
+        SPSessionID = swap_endian_32(parse_int(response, &i));
+        printf("HostSessionID: %x,  SPSessionID: %x \n", HostSessionID, SPSessionID);
+        i += 1; // end list token
+        i += 1; // end of data token
+        // method status list
+        printf("method status code: %s (%i)\n", MSC_to_string(response[i + 1]), response[i + 1]);
+        i += 5;
+    }
 
 
     // unlock range
-    memset(buffer, 0, sizeof(buffer));
-    memset(response, 0, sizeof(response));
-    i = 0;
+    {
+        memset(buffer, 0, sizeof(buffer));
+        i = 0;
 
-    struct HeadersStruct *headers = (void *)(((unsigned char *)buffer));
-    prepare_headers(buffer, &i, SPSessionID, HostSessionID);
+        printf("\nSending Set LockingRange1:\n");
+        prepare_headers(buffer, &i, SPSessionID, HostSessionID);
+        locking_range(buffer, &i);
+        finish_headers(buffer, &i);
 
-    locking_range(buffer, &i);
+        ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
 
-    finish_headers(buffer, &i);
-
-
-    printf("\nSending Set LockingRange1:\n");
-    ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
-
-    printf("\nGetting Set LockingRange1 Result:\n");
-    com_packet = response;
-    do  {
+        printf("\nGetting Set LockingRange1 Result:\n");
         memset(response, 0, sizeof(response));
-        msleep(20);
-        ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
-    } while ((0 != com_packet->outstanding_data) && (0 == com_packet->min_transfer));
-    printf("\n");
+        com_packet = response;
+        do  {
+            memset(response, 0, sizeof(response));
+            msleep(20);
+            ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
+        } while ((0 != com_packet->outstanding_data) && (0 == com_packet->min_transfer));
+        printf("\n");
+    }
 
     // end session
-    memset(buffer, 0, sizeof(buffer));
-    memset(response, 0, sizeof(response));
-    i = 0;
+    {
+        memset(buffer, 0, sizeof(buffer));
+        i = 0;
+        
+        printf("\nSending EndSession\n");
+        prepare_headers(buffer, &i, SPSessionID, HostSessionID);
+        end_session(buffer, &i);
+        finish_headers(buffer, &i);
 
-    com_packet = (void *)(((unsigned char *)buffer) + i);
-    com_packet->comid = swap_endian_16(base_comID);
-    i += sizeof(struct ComPacket);
+        ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
 
-    packet = (void *)(((unsigned char *)buffer) + i);
-    packet->session = SPSessionID | HostSessionID << 32;
-    i += sizeof(struct Packet);
-
-    data_subpacket = (void *)(((unsigned char *)buffer) + i);
-    i += sizeof(struct DataSubPacket);
-
-    end_session(buffer, &i);
-    // i = 512;
-
-    com_packet->length = swap_endian_32(i - sizeof(struct ComPacket));
-    packet->length = swap_endian_32(swap_endian_32(com_packet->length) - sizeof(struct Packet));
-    data_subpacket->length = swap_endian_32(swap_endian_32(packet->length) - sizeof(struct DataSubPacket));
-
-    printf("\nSending EndSession\n");
-    ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
-    printf("\n");
-    printf("\nGetting EndSession Response:\n");
-    com_packet = response;
-    do {
+        printf("\nGetting EndSession Response:\n");
         memset(response, 0, sizeof(response));
-        msleep(20);
-        ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
-    } while ((0 != com_packet->outstanding_data) && (0 == com_packet->min_transfer));
-    printf("\n");
+        com_packet = response;
+        do {
+            memset(response, 0, sizeof(response));
+            msleep(20);
+            ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
+        } while ((0 != com_packet->outstanding_data) && (0 == com_packet->min_transfer));
+        printf("\n");
+    }
 }
 
 int main(int argc, char **argv)
