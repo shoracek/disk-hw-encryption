@@ -632,11 +632,12 @@ int get(unsigned char *buffer, size_t *i, unsigned char *invoking_id, size_t inv
     *i += PADDING_ALIGNMENT - (*i % PADDING_ALIGNMENT); // padding
 }
 
-int locking_range(unsigned char *buffer, size_t *i)
+int locking_range(unsigned char *buffer, size_t *i, char read_lock_enabled, char write_lock_enabled, char read_locked, char write_locked)
 {
     // Core: Table 226 Locking Table Description
     // Data Payload
     call_token(buffer, i);
+    // https://trustedcomputinggroup.org/wp-content/uploads/TCG-Storage-Opal-SSC-v2p02-r1p0_pub24jan2022.pdf: Table 39 Locking SP
     // Locking_Range1 UID
     short_atom(buffer, i, 1, "\x00\x00\x08\x02\x00\x03\x00\x01", 8);
     // Set Method UID
@@ -651,34 +652,42 @@ int locking_range(unsigned char *buffer, size_t *i)
             // [
             start_list(buffer, i);
             {
-                // "ReadLockEnabled" = 1
-                start_name_list(buffer, i);
-                {
-                    tiny_atom(buffer, i, 0, 5);
-                    tiny_atom(buffer, i, 0, 0);
+                if (read_lock_enabled != -1) {
+                    start_name_list(buffer, i);
+                    {
+                        printf("read_lock_enabled = %i\n", read_lock_enabled);
+                        tiny_atom(buffer, i, 0, 5);
+                        tiny_atom(buffer, i, 0, read_lock_enabled);
+                    }
+                    end_name_list(buffer, i);
                 }
-                end_name_list(buffer, i);
-                // "WriteLockEnabled" = 1
-                start_name_list(buffer, i);
-                {
-                    tiny_atom(buffer, i, 0, 6);
-                    tiny_atom(buffer, i, 0, 1);
+                if (write_lock_enabled != -1) {
+                    start_name_list(buffer, i);
+                    {
+                        printf("write_lock_enabled = %i\n", write_lock_enabled);
+                        tiny_atom(buffer, i, 0, 6);
+                        tiny_atom(buffer, i, 0, write_lock_enabled);
+                    }
+                    end_name_list(buffer, i);
                 }
-                end_name_list(buffer, i);
-                // // "ReadLocked" = 1
-                // start_name_list(buffer, i);
-                // {
-                //     tiny_atom(buffer, i, 0, 7);
-                //     tiny_atom(buffer, i, 0, 1);
-                // }
-                // end_name_list(buffer, i);
-                // // "WriteLocked" = 1
-                // start_name_list(buffer, i);
-                // {
-                //     tiny_atom(buffer, i, 0, 8);
-                //     tiny_atom(buffer, i, 0, 1);
-                // }
-                // end_name_list(buffer, i);
+                if (read_locked != -1) {
+                    start_name_list(buffer, i);
+                    {
+                        printf("read_locked = %i\n", read_locked);
+                        tiny_atom(buffer, i, 0, 7);
+                        tiny_atom(buffer, i, 0, read_locked);
+                    }
+                    end_name_list(buffer, i);
+                }
+                if (write_locked != -1) {
+                    start_name_list(buffer, i);
+                    {
+                        printf("write_locked = %i\n", write_locked);
+                        tiny_atom(buffer, i, 0, 8);
+                        tiny_atom(buffer, i, 0, write_locked);
+                    }
+                    end_name_list(buffer, i);
+                }
             }
             // ]
             end_list(buffer, i);
@@ -846,7 +855,7 @@ void finish_headers(unsigned char *buffer, size_t *i) {
     headers->data_subpacket.length = swap_endian_32(swap_endian_32(headers->packet.length) - sizeof(struct DataSubPacket)); // swap_endian_32(0x58);
 }
 
-void unlock_range(int fd)
+void unlock_range(int fd, char read_lock_enabled, char write_lock_enabled, char read_locked, char write_locked)
 {
     // Taking ownership of the storage device
     size_t i = 0;
@@ -854,48 +863,35 @@ void unlock_range(int fd)
     struct Packet *packet;
     struct DataSubPacket *data_subpacket;
     uint64_t HostSessionID = 0;
-uint64_t SPSessionID = 0;
+    uint64_t SPSessionID = 0;
 
     printf("Unlock range:\n");
-    unsigned char buffer[10000] = {0};
+    unsigned char buffer[4096] = {0};
     unsigned char response[4096] = {0};
 
-    // i=4096;
-    printf("\nDiscovery 0:\n");
+    printf("Discovery 0:\n");
     ata_discovery(fd);
-    printf("baseCOMID = %x\n", base_comID);
-    printf("\n");
+    printf("    base ComID = %x\n", base_comID);
 
     // StartSession
     {
+
+        printf("Sending StartSession:\n");
         memset(buffer, 0, sizeof(buffer));
         i = 0;
-
-        printf("\nSending StartSession:\n");
         prepare_headers(buffer, &i, SPSessionID, HostSessionID);
-        start_session(buffer, &i, LOCKING_SP_UID, 8, "\xc1\xef\x2a\xaa\xf6\xa6\xac\x7b\xd9\x79\x1c\xdb\x64\xf3\xac\x2a\x4f\x42\x96\xdd\xb4\x4f\x29\x98\x20\x87\xb7\xb3\xd8\xba\xa2\xa9", 32, NULL, 0, ADMIN1_UID, 8);
+        unsigned char *salted_hashed_etc_challenge = "\xc1\xef\x2a\xaa\xf6\xa6\xac\x7b\xd9\x79\x1c\xdb\x64\xf3\xac\x2a\x4f\x42\x96\xdd\xb4\x4f\x29\x98\x20\x87\xb7\xb3\xd8\xba\xa2\xa9";
+        start_session(buffer, &i, LOCKING_SP_UID, 8, salted_hashed_etc_challenge, 32, NULL, 0, ADMIN1_UID, 8);
         finish_headers(buffer, &i);
 
         ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
 
-        printf("\nGetting SyncSession:\n");
+        printf("Getting SyncSession:\n");
         memset(response, 0, sizeof(response));
-        com_packet = response;
-        do  {
-            memset(response, 0, sizeof(response));
-            msleep(20);
-            ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
-        } while ((0 != com_packet->outstanding_data) && (0 == com_packet->min_transfer));
-        printf("\n");
+        ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
 
         i = 0;
-        com_packet = (void *)(((unsigned char *)response) + i);
-        i += sizeof(struct ComPacket);
-        packet = (void *)(((unsigned char *)response) + i);
-        i += sizeof(struct Packet);
-        data_subpacket = (void *)(((unsigned char *)response) + i);
-        i += sizeof(struct DataSubPacket);
-
+        i += sizeof(struct HeadersStruct); // headers
         i += 1; // call token
         i += 1; // short atom
         i += 8; // invoking uid
@@ -915,48 +911,35 @@ uint64_t SPSessionID = 0;
 
     // unlock range
     {
+
+        printf("Sending Set LockingRange1:\n");
         memset(buffer, 0, sizeof(buffer));
         i = 0;
-
-        printf("\nSending Set LockingRange1:\n");
         prepare_headers(buffer, &i, SPSessionID, HostSessionID);
-        locking_range(buffer, &i);
+        locking_range(buffer, &i, read_lock_enabled, write_lock_enabled, read_locked, write_locked);
         finish_headers(buffer, &i);
 
         ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
 
-        printf("\nGetting Set LockingRange1 Result:\n");
+        printf("Getting Set LockingRange1 Result:\n");
         memset(response, 0, sizeof(response));
-        com_packet = response;
-        do  {
-            memset(response, 0, sizeof(response));
-            msleep(20);
-            ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
-        } while ((0 != com_packet->outstanding_data) && (0 == com_packet->min_transfer));
-        printf("\n");
+        ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
     }
 
     // end session
     {
+        printf("Sending EndSession\n");
         memset(buffer, 0, sizeof(buffer));
         i = 0;
-        
-        printf("\nSending EndSession\n");
         prepare_headers(buffer, &i, SPSessionID, HostSessionID);
         end_session(buffer, &i);
         finish_headers(buffer, &i);
 
         ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
 
-        printf("\nGetting EndSession Response:\n");
+        printf("Getting EndSession Response:\n");
         memset(response, 0, sizeof(response));
-        com_packet = response;
-        do {
-            memset(response, 0, sizeof(response));
-            msleep(20);
-            ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
-        } while ((0 != com_packet->outstanding_data) && (0 == com_packet->min_transfer));
-        printf("\n");
+        ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
     }
 }
 
@@ -965,7 +948,7 @@ int main(int argc, char **argv)
     int err = 0;
     int fd = 0;
 
-    if (argc == 3) {
+    if (argc >= 3) {
         fd = open(argv[2], O_RDWR);
     }
 
@@ -976,7 +959,11 @@ int main(int argc, char **argv)
     } else if (strcmp(argv[1], "todo") == 0) {
         // return todo_take_ownership();
     } else if (strcmp(argv[1], "unlock") == 0) {
-    	unlock_range(fd);
+        char args[4] = { 0 };
+        for (int i = 0; i < 4; ++i) {
+            args[i] = argv[3][i] == '0' ? 0 : argv[3][i] == '1' ? 1 : -1;
+        }
+        unlock_range(fd, args[0], args[1], args[2], args[3]);
     } else {
         printf("invalid command\n");
 
