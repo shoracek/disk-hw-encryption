@@ -16,17 +16,90 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <time.h>
+
+uint16_t base_comID = 0;
+
+/* msleep(): Sleep for the requested number of milliseconds. */
+int msleep(long msec)
+{
+    struct timespec ts;
+    int res;
+
+    if (msec < 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    ts.tv_sec = msec / 1000;
+    ts.tv_nsec = (msec % 1000) * 1000000;
+
+    do {
+        res = nanosleep(&ts, &ts);
+    } while (res && errno == EINTR);
+
+    return res;
+}
 
 #define ATA_TRUSTED_RECEIVE 0x5c
 #define ATA_TRUSTED_SEND 0x5e
 #define TCG_LEVEL_0_DISCOVERY_PROTOCOL_ID 0x01
 #define TCG_LEVEL_0_DISCOVERY_COMID 0x0001
 
+// https://trustedcomputinggroup.org/wp-content/uploads/TCG_Storage_Architecture_Core_Spec_v2.01_r1.00.pdf
+// Table 242 MethodID UIDs
 #define METHOD_UID_START_SESSION "\x00\x00\x00\x00\x00\x00\xff\x02"
-#define SMUID "\x00\x00\x00\x00\x00\x00\x00\xff"
-#define SMUID_LEN 8
+#define METHOD_UID_SET           "\x00\x00\x00\x06\x00\x00\x00\x17"
+
+#define SMUID          "\x00\x00\x00\x00\x00\x00\x00\xff"
 #define LOCKING_SP_UID "\x00\x00\x02\x05\x00\x00\x00\x02"
-#define ADMIN1_UID "\x00\x00\x00\x09\x00\x01\x00\x01"
+#define ADMIN1_UID     "\x00\x00\x00\x09\x00\x01\x00\x01"
+
+// Table 166 Status Codes
+enum MethodStatusCode {
+    MSC_SUCCESS = 0x00,
+    MSC_NOT_AUTHORIZED = 0x01,
+    // MSC_OBSOLETE = 0x02,
+    MSC_SP_BUSY = 0x03,
+    MSC_SP_FAILED = 0x04,
+    MSC_SP_DISABLED = 0x05,
+    MSC_SP_FROZEN = 0x06,
+    MSC_NO_SESSIONS_AVAILABLE = 0x07,
+    MSC_UNIQUENESS_CONFLICT = 0x08,
+    MSC_INSUFFICIENT_SPACE = 0x09,
+    MSC_INSUFFICIENT_ROWS = 0x0A,
+    MSC_INVALID_PARAMETER = 0x0C,
+    // MSC_OBSOLETE = 0x0D,
+    // MSC_OBSOLETE = 0x0E,
+    MSC_TPER_MALFUNCTION = 0x0F,
+    MSC_TRANSACTION_FAILURE = 0x10,
+    MSC_RESPONSE_OVERFLOW = 0x11,
+    MSC_AUTHORITY_LOCKED_OUT = 0x12,
+    MSC_FAIL = 0x3F,
+};
+
+const char *MSC_to_string(enum MethodStatusCode msc) {
+    switch (msc) {
+        case MSC_SUCCESS: return "MSC_SUCCESS";
+        case MSC_NOT_AUTHORIZED: return "MSC_NOT_AUTHORIZED";
+        case MSC_SP_BUSY: return "MSC_SP_BUSY";
+        case MSC_SP_FAILED: return "MSC_SP_FAILED";
+        case MSC_SP_DISABLED: return "MSC_SP_DISABLED";
+        case MSC_SP_FROZEN: return "MSC_SP_FROZEN";
+        case MSC_NO_SESSIONS_AVAILABLE: return "MSC_NO_SESSIONS_AVAILABLE";
+        case MSC_UNIQUENESS_CONFLICT: return "MSC_UNIQUENESS_CONFLICT";
+        case MSC_INSUFFICIENT_SPACE: return "MSC_INSUFFICIENT_SPACE";
+        case MSC_INSUFFICIENT_ROWS: return "MSC_INSUFFICIENT_ROWS";
+        case MSC_INVALID_PARAMETER: return "MSC_INVALID_PARAMETER";
+        case MSC_TPER_MALFUNCTION: return "MSC_TPER_MALFUNCTION";
+        case MSC_TRANSACTION_FAILURE: return "MSC_TRANSACTION_FAILURE";
+        case MSC_RESPONSE_OVERFLOW: return "MSC_RESPONSE_OVERFLOW";
+        case MSC_AUTHORITY_LOCKED_OUT: return "MSC_AUTHORITY_LOCKED_OUT";
+        case MSC_FAIL: return "MSC_FAIL";
+        default: return "YIKES";
+    }
+}
 
 struct identify_controller_data {
     char vid[2];
@@ -223,6 +296,8 @@ void tcg_discovery_0_process_feature(void *data, int feature_code)
                swap_endian_16(body->base_comID), swap_endian_16(body->number_of_comIDs),
                swap_endian_16(body->number_of_locking_admin_authorities_supported),
                swap_endian_16(body->number_of_locking_user_authorities_supported));
+
+               base_comID = swap_endian_16(body->base_comID);
     } else {
         printf("unimplemented feature %i\n", feature_code);
     }
@@ -246,7 +321,7 @@ void tcg_discovery_0_process_response(void *data)
 
 int ata_trusted(int fd, uint8_t *response, size_t response_len, int cmd, int protocol, int comID)
 {
-    send_packet(response, response_len);
+    // send_packet(response, response_len);
 
     // https://wiki.osdev.org/ATA_Command_Matrix
     // https://en.wikipedia.org/wiki/SCSI_command#List_of_SCSI_commands
@@ -291,6 +366,10 @@ int ata_trusted(int fd, uint8_t *response, size_t response_len, int cmd, int pro
         uint8_t control;
     };
 
+    if (response_len % 512 != 0) {
+        response_len += 512 - (response_len % 512); // padding
+    }
+
     struct CDB_ATA_PASS_THROUGH cdb = {
         .operation_code = 0xa1,
         // https://people.freebsd.org/~imp/asiabsdcon2015/works/d2161r5-ATAATAPI_Command_Set_-_3.pdf
@@ -301,7 +380,7 @@ int ata_trusted(int fd, uint8_t *response, size_t response_len, int cmd, int pro
         .byt_blok = 1, // -> t_length contains number of blocks to transfer (bytes are waaaaay too slow)
         .t_length = 2, // -> transfer length in sector_count/trusted_receive.transfer_length
         .trusted_receive.security_protocol = protocol,
-        .trusted_receive.transfer_length = response_len / 4096,
+        .trusted_receive.transfer_length = response_len / 512,
         .trusted_receive.sp_specific = comID,
         .trusted_receive.command = cmd,
     };
@@ -322,6 +401,24 @@ int ata_trusted(int fd, uint8_t *response, size_t response_len, int cmd, int pro
         // todo: figure out sense
     };
 
+
+    // printf("sendCommand(cmd: %i, protocol: %i, comID: %i)\n", cmd, protocol, comID);
+
+    // printf("\nsg:\n");
+    // for (unsigned int i = 0; i < sizeof(sg); ++i) {
+    //     printf("%02x ", ((unsigned char *)&sg)[i]);
+    // }
+    // printf("\ncdb:\n");
+    // for (unsigned int i = 0; i < sizeof(cdb); ++i) {
+    //     printf("%02x ", ((unsigned char *)&cdb)[i]);
+    // }
+    // printf("\nbuffer:\n");
+    // for (unsigned int i = 0; i < response_len; ++i) {
+    //     printf("%02x ", ((unsigned char *)response)[i]);
+    // }
+    // printf("\n\n");
+
+
     if (ioctl(fd, SG_IO, &sg) < 0) {
         printf("bad ioctl %s\n", strerror(errno));
     }
@@ -334,6 +431,7 @@ printf("\n");
     if (!((0x00 == sense[0]) && (0x00 == sense[1])))
         if (!((0x72 == sense[0]) && (0x0b == sense[1])))  printf("NOK\n"); // not ATA response
     printf ("ok: %02x\n", sense[11]);
+
     send_packet(response, response_len);
 
 }
@@ -380,6 +478,8 @@ int nvme_send(int fd, unsigned char *response, size_t response_len)
 #define CALL_TOKEN 0xf8
 #define END_OF_DATA_TOKEN 0xf9
 
+#define PADDING_ALIGNMENT 512
+
 void start_list(unsigned char *buffer, size_t *i)
 {
     buffer[*i] = 0xf0;
@@ -406,13 +506,19 @@ void end_name_list(unsigned char *buffer, size_t *i)
 
 void call_token(unsigned char *buffer, size_t *i)
 {
-    buffer[*i] = 0xf8;
+    buffer[*i] = CALL_TOKEN;
     *i += 1;
 }
 
 void end_of_data(unsigned char *buffer, size_t *i)
 {
     buffer[*i] = 0xf9;
+    *i += 1;
+}
+
+void end_session_token(unsigned char *buffer, size_t *i)
+{
+    buffer[*i] = 0xfa;
     *i += 1;
 }
 
@@ -451,6 +557,30 @@ void medium_atom(unsigned char *buffer, size_t *i, unsigned char S, unsigned cha
     memcpy(buffer + *i, V, V_len);
     *i += V_len;
 }
+
+uint64_t parse_int(unsigned char *buffer, size_t *i)
+{
+    printf("starting with %02x\n", buffer[*i]);
+    uint64_t result = 0;
+    if ((buffer[*i] & (0b1 << 7)) == (0b0 << 7)) {
+        result = buffer[*i] & 0b00111111;
+        *i += 1;
+        
+        result = -1;
+    } else if ((buffer[*i] & (0b11 << 6)) == (0b10 << 6)) {
+        size_t len = buffer[*i] & (0b00011111);
+        printf("len: %i\n", len);
+        *i += 1;
+        
+        for (int j = 0; j < len; ++j) {
+            result |= buffer[*i] << (((len - 1) - j) * 8);
+            printf("adding: %02x << %i\n", buffer[*i], ((len - 1) - j));
+            *i += 1;
+        }
+    }
+    return result;
+}
+
 
 int get(unsigned char *buffer, size_t *i, unsigned char *invoking_id, size_t invoking_id_len)
 {
@@ -499,7 +629,71 @@ int get(unsigned char *buffer, size_t *i, unsigned char *invoking_id, size_t inv
     end_of_data(buffer, i);
     method_status_list(buffer, i);
 
-    *i += 4 - (*i % 4); // padding
+    *i += PADDING_ALIGNMENT - (*i % PADDING_ALIGNMENT); // padding
+}
+
+int locking_range(unsigned char *buffer, size_t *i)
+{
+    // Core: Table 226 Locking Table Description
+    // Data Payload
+    call_token(buffer, i);
+    // Locking_Range1 UID
+    short_atom(buffer, i, 1, "\x00\x00\x08\x02\x00\x03\x00\x01", 8);
+    // Set Method UID
+    short_atom(buffer, i, 1, METHOD_UID_SET, 8);
+    // [
+    start_list(buffer, i);
+    {
+        // "Values" = [...]
+        start_name_list(buffer, i);
+        {
+            tiny_atom(buffer, i, 0, 1);
+            // [
+            start_list(buffer, i);
+            {
+                // "ReadLockEnabled" = 1
+                start_name_list(buffer, i);
+                {
+                    tiny_atom(buffer, i, 0, 5);
+                    tiny_atom(buffer, i, 0, 0);
+                }
+                end_name_list(buffer, i);
+                // "WriteLockEnabled" = 1
+                start_name_list(buffer, i);
+                {
+                    tiny_atom(buffer, i, 0, 6);
+                    tiny_atom(buffer, i, 0, 1);
+                }
+                end_name_list(buffer, i);
+                // // "ReadLocked" = 1
+                // start_name_list(buffer, i);
+                // {
+                //     tiny_atom(buffer, i, 0, 7);
+                //     tiny_atom(buffer, i, 0, 1);
+                // }
+                // end_name_list(buffer, i);
+                // // "WriteLocked" = 1
+                // start_name_list(buffer, i);
+                // {
+                //     tiny_atom(buffer, i, 0, 8);
+                //     tiny_atom(buffer, i, 0, 1);
+                // }
+                // end_name_list(buffer, i);
+            }
+            // ]
+            end_list(buffer, i);
+        }
+        end_name_list(buffer, i);
+    }
+    // ]
+    end_list(buffer, i);
+    end_of_data(buffer, i);
+    method_status_list(buffer, i);
+}
+
+int end_session(unsigned char *buffer, size_t *i) {
+    end_session_token(buffer, i);
+    *i += PADDING_ALIGNMENT - (*i % PADDING_ALIGNMENT); // padding
 }
 
 int start_session(unsigned char *buffer, size_t *i, unsigned char *SPID, size_t SPID_len, unsigned char *host_challenge,
@@ -528,14 +722,19 @@ int start_session(unsigned char *buffer, size_t *i, unsigned char *SPID, size_t 
     // Data Payload
     call_token(buffer, i);
     // Session Manager UID
-    short_atom(buffer, i, 1, SMUID, SMUID_LEN);
+    short_atom(buffer, i, 1, SMUID, 8);
     // Method UID (Table 241) - StartSession
     short_atom(buffer, i, 1, METHOD_UID_START_SESSION, 8);
     // [
     start_list(buffer, i);
     {
         // HostSessionID : uinteger,
-        tiny_atom(buffer, i, 0, 1);
+        // tiny_atom(buffer, i, 0, 1);
+        buffer[*i] = 0x81;
+        *i += 1;
+        buffer[*i] = 0x69;
+        *i += 1;
+
         // SPID : uidref {SPObjectUID},
         short_atom(buffer, i, 1, SPID, SPID_len);
         // Write : boolean,
@@ -579,7 +778,7 @@ int start_session(unsigned char *buffer, size_t *i, unsigned char *SPID, size_t 
     end_of_data(buffer, i);
     method_status_list(buffer, i);
 
-    *i += 4 - (*i % 4); // padding
+    *i += PADDING_ALIGNMENT - (*i % PADDING_ALIGNMENT); // padding
 }
 
 struct ComPacket {
@@ -608,104 +807,12 @@ struct DataSubPacket {
 
 void send_packet(const unsigned char *buffer, size_t buffer_len)
 {
+    return;
     printf("%i:\n", buffer_len);
     for (int j = 0; j < buffer_len; ++j) {
         printf("%02x ", buffer[j]);
     }
     printf("\n");
-}
-
-int todo_todo2()
-{
-    printf("hello world\n");
-
-    // Activating the Locking SP
-    unsigned char buffer[2048];
-    size_t i;
-    struct ComPacket *com_packet;
-    struct Packet *packet;
-    struct DataSubPacket *data_subpacket;
-
-    // StartSession
-    memset(buffer, 0, sizeof(buffer));
-    i = 0;
-
-    com_packet = (void *)(((unsigned char *)buffer) + i);
-    com_packet->comid = swap_endian_16(0x07fe);
-    i += sizeof(struct ComPacket);
-
-    packet = (void *)(((unsigned char *)buffer) + i);
-    i += sizeof(struct Packet);
-
-    data_subpacket = (void *)(((unsigned char *)buffer) + i);
-    i += sizeof(struct DataSubPacket);
-
-    start_session(buffer, &i, "\x00\x00\x02\x05\x00\x00\x00\x01", 8,
-                  "\x3c\x6e\x65\x77\x5f\x53\x49\x44\x5f\x70\x61\x73\x73\x77\x6f\x72\x64\x3e", 18, NULL, 0,
-                  "\x00\x00\x00\x09\x00\x00\x00\x06", 8);
-
-    com_packet->length = swap_endian_32(i - sizeof(struct ComPacket));
-    packet->length = swap_endian_32(swap_endian_32(com_packet->length) - sizeof(struct Packet));
-    data_subpacket->length = swap_endian_32(swap_endian_32(packet->length) - sizeof(struct DataSubPacket) - 3);
-
-    send_packet(buffer, i);
-}
-
-int todo_take_ownership()
-{
-    printf("hello world\n");
-
-    // Taking ownership of the storage device
-    unsigned char buffer[2048];
-    size_t i;
-    struct ComPacket *com_packet;
-    struct Packet *packet;
-    struct DataSubPacket *data_subpacket;
-
-    // StartSession
-    memset(buffer, 0, sizeof(buffer));
-    i = 0;
-
-    com_packet = (void *)(((unsigned char *)buffer) + i);
-    com_packet->comid = swap_endian_16(0x07fe);
-    i += sizeof(struct ComPacket);
-
-    packet = (void *)(((unsigned char *)buffer) + i);
-    i += sizeof(struct Packet);
-
-    data_subpacket = (void *)(((unsigned char *)buffer) + i);
-    i += sizeof(struct DataSubPacket);
-
-    start_session(buffer, &i, "\x00\x00\x02\x05\x00\x00\x00\x01", 8, NULL, 0, NULL, 0, NULL, 0);
-
-    com_packet->length = swap_endian_32(i - sizeof(struct ComPacket));
-    packet->length = swap_endian_32(swap_endian_32(com_packet->length) - sizeof(struct Packet));
-    data_subpacket->length = swap_endian_32(swap_endian_32(packet->length) - sizeof(struct DataSubPacket) - 3);
-
-    send_packet(buffer, i);
-
-    // SyncSession
-    memset(buffer, 0, sizeof(buffer));
-    i = 0;
-
-    com_packet = (void *)(((unsigned char *)buffer) + i);
-    com_packet->comid = swap_endian_16(0x07fe);
-    i += sizeof(struct ComPacket);
-
-    packet = (void *)(((unsigned char *)buffer) + i);
-    packet->session = swap_endian_64(0x00001001LL << 32 | 0x0000001);
-    i += sizeof(struct Packet);
-
-    data_subpacket = (void *)(((unsigned char *)buffer) + i);
-    i += sizeof(struct DataSubPacket);
-
-    get(buffer, &i, "\x00\x00\x00\x0B\x00\x00\x84\x02", 8);
-
-    com_packet->length = swap_endian_32(i - sizeof(struct ComPacket));
-    packet->length = swap_endian_32(swap_endian_32(com_packet->length) - sizeof(struct Packet));
-    data_subpacket->length = swap_endian_32(swap_endian_32(packet->length) - sizeof(struct DataSubPacket) - 3);
-
-    send_packet(buffer, i);
 }
 
 void ata_discovery(int fd)
@@ -716,44 +823,185 @@ void ata_discovery(int fd)
     tcg_discovery_0_process_response(response);
 }
 
+struct HeadersStruct {
+    struct ComPacket com_packet;
+    struct Packet packet;
+    struct DataSubPacket data_subpacket;
+};
+
+void prepare_headers(unsigned char *buffer, size_t *i, uint64_t sp_session_id, uint64_t host_session_id) {
+    struct HeadersStruct *headers = (void *)(((unsigned char *)buffer));
+
+    headers->com_packet.comid = swap_endian_16(base_comID);
+    headers->packet.session = sp_session_id | host_session_id << 32;
+
+    *i += sizeof(struct HeadersStruct);
+}
+
+void finish_headers(unsigned char *buffer, size_t *i) {
+    struct HeadersStruct *headers = (void *)(((unsigned char *)buffer));
+
+    headers->com_packet.length = swap_endian_32(*i - sizeof(struct ComPacket)); // swap_endian_32(0x7c);
+    headers->packet.length = swap_endian_32(swap_endian_32(headers->com_packet.length) - sizeof(struct Packet)); // swap_endian_32(0x64);
+    headers->data_subpacket.length = swap_endian_32(swap_endian_32(headers->packet.length) - sizeof(struct DataSubPacket)); // swap_endian_32(0x58);
+}
+
 void unlock_range(int fd)
 {
     // Taking ownership of the storage device
-    size_t i;
+    size_t i = 0;
     struct ComPacket *com_packet;
     struct Packet *packet;
     struct DataSubPacket *data_subpacket;
 
-    printf("hello world\n");
-    unsigned char buffer[10000];
-    memset(buffer, 0, sizeof(buffer));
-    i=2048;
+    printf("Unlock range:\n");
+    unsigned char buffer[10000] = {0};
+    unsigned char response[4096] = {0};
 
-    ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, 0x1);
+    // i=4096;
+    printf("\nDiscovery 0:\n");
+    ata_discovery(fd);
+    printf("baseCOMID = %x\n", base_comID);
+    printf("\n");
+
+    // SetParameters
+    memset(buffer, 0, sizeof(buffer));
+    memset(response, 0, sizeof(response));
+    i = 0;
+
+    prepare_headers(buffer, &i, 0, 0);
+    
+    memcpy(buffer, "\x00\x00\x00\x00\x7f\xfe\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xb0\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x98\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x8c\xf8\xa8\x00\x00\x00\x00\x00\x00\x00\xff\xa8\x00\x00\x00\x00\x00\x00\xff\x01\xf0\xf2\x00\xf0\xf2\xd0\x10\x4d\x61\x78\x43\x6f\x6d\x50\x61\x63\x6b\x65\x74\x53\x69\x7a\x65\x82\x08\x00\xf3\xf2\xad\x4d\x61\x78\x50\x61\x63\x6b\x65\x74\x53\x69\x7a\x65\x82\x07\xec\xf3\xf2\xaf\x4d\x61\x78\x49\x6e\x64\x54\x6f\x6b\x65\x6e\x53\x69\x7a\x65\x82\x07\xc8\xf3\xf2\xaa\x4d\x61\x78\x50\x61\x63\x6b\x65\x74\x73\x01\xf3\xf2\xad\x4d\x61\x78\x53\x75\x62\x70\x61\x63\x6b\x65\x74\x73\x01\xf3\xf2\xaa\x4d\x61\x78\x4d\x65\x74\x68\x6f\x64\x73\x01\xf3\xf1\xf3\xf1\xf9\xf0\x00\x00\x00\xf1", 196);
+    i = 512;
+
+    finish_headers(buffer, &i);
+
+    printf("\nSending SetParameters:\n");
+    ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
+    printf("\n");
+
+
+    printf("\nGetting SetParameters:\n");
+    com_packet = response;
+    do  {
+        memset(response, 0, sizeof(response));
+        msleep(20);
+        ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
+    } while ((0 != com_packet->outstanding_data) && (0 == com_packet->min_transfer));
+    printf("\n");
 
 
     // StartSession
     memset(buffer, 0, sizeof(buffer));
+    memset(response, 0, sizeof(response));
+    i = 0;
+
+    prepare_headers(buffer, &i, 0, 0);
+
+    start_session(buffer, &i, LOCKING_SP_UID, 8, "\xc1\xef\x2a\xaa\xf6\xa6\xac\x7b\xd9\x79\x1c\xdb\x64\xf3\xac\x2a\x4f\x42\x96\xdd\xb4\x4f\x29\x98\x20\x87\xb7\xb3\xd8\xba\xa2\xa9", 32, NULL, 0, ADMIN1_UID, 8);
+
+    finish_headers(buffer, &i);
+
+    // i = 512;
+    printf("\nSending StartSession:\n");
+    ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
+    printf("\n");
+
+    printf("\nGetting SyncSession:\n");
+    com_packet = response;
+    do  {
+        memset(response, 0, sizeof(response));
+        msleep(20);
+        ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
+    } while ((0 != com_packet->outstanding_data) && (0 == com_packet->min_transfer));
+    printf("\n");
+
+    i = 0;
+    com_packet = (void *)(((unsigned char *)response) + i);
+    i += sizeof(struct ComPacket);
+    packet = (void *)(((unsigned char *)response) + i);
+    i += sizeof(struct Packet);
+    data_subpacket = (void *)(((unsigned char *)response) + i);
+    i += sizeof(struct DataSubPacket);
+
+    i += 1; // call token
+    i += 1; // short atom
+    i += 8; // invoking uid
+    i += 1; // short atom
+    i += 8; // method uid
+    i += 1; // start list token
+    uint64_t HostSessionID = swap_endian_32(parse_int(response, &i));
+    uint64_t SPSessionID = swap_endian_32(parse_int(response, &i));
+    printf("HostSessionID: %x,  SPSessionID: %x \n", HostSessionID, SPSessionID);
+    i += 1; // end list token
+    i += 1; // end of data token
+    // method status list
+    printf("method status code: %s (%i)\n", MSC_to_string(response[i + 1]), response[i + 1]);
+    i += 5;
+
+
+
+
+
+    // unlock range
+    memset(buffer, 0, sizeof(buffer));
+    memset(response, 0, sizeof(response));
+    i = 0;
+
+    struct HeadersStruct *headers = (void *)(((unsigned char *)buffer));
+    prepare_headers(buffer, &i, SPSessionID, HostSessionID);
+
+    locking_range(buffer, &i);
+
+    finish_headers(buffer, &i);
+
+
+    printf("\nSending Set LockingRange1:\n");
+    ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
+
+    printf("\nGetting Set LockingRange1 Result:\n");
+    com_packet = response;
+    do  {
+        memset(response, 0, sizeof(response));
+        msleep(20);
+        ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
+    } while ((0 != com_packet->outstanding_data) && (0 == com_packet->min_transfer));
+    printf("\n");
+
+    // end session
+    memset(buffer, 0, sizeof(buffer));
+    memset(response, 0, sizeof(response));
     i = 0;
 
     com_packet = (void *)(((unsigned char *)buffer) + i);
-    com_packet->comid = swap_endian_16(0x7ffe);
+    com_packet->comid = swap_endian_16(base_comID);
     i += sizeof(struct ComPacket);
 
     packet = (void *)(((unsigned char *)buffer) + i);
+    packet->session = SPSessionID | HostSessionID << 32;
     i += sizeof(struct Packet);
 
     data_subpacket = (void *)(((unsigned char *)buffer) + i);
     i += sizeof(struct DataSubPacket);
 
-    start_session(buffer, &i, LOCKING_SP_UID, 8, "password", 8, NULL, 0, ADMIN1_UID, 8);
+    end_session(buffer, &i);
+    // i = 512;
 
-i = 512;
     com_packet->length = swap_endian_32(i - sizeof(struct ComPacket));
     packet->length = swap_endian_32(swap_endian_32(com_packet->length) - sizeof(struct Packet));
-    data_subpacket->length = swap_endian_32(swap_endian_32(packet->length) - sizeof(struct DataSubPacket) - 3);
+    data_subpacket->length = swap_endian_32(swap_endian_32(packet->length) - sizeof(struct DataSubPacket));
 
-    ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, 0x7ffe);
+    printf("\nSending EndSession\n");
+    ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
+    printf("\n");
+    printf("\nGetting EndSession Response:\n");
+    com_packet = response;
+    do {
+        memset(response, 0, sizeof(response));
+        msleep(20);
+        ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
+    } while ((0 != com_packet->outstanding_data) && (0 == com_packet->min_transfer));
+    printf("\n");
 }
 
 int main(int argc, char **argv)
@@ -772,7 +1020,7 @@ int main(int argc, char **argv)
     } else if (strcmp(argv[1], "todo") == 0) {
         // return todo_take_ownership();
     } else if (strcmp(argv[1], "unlock") == 0) {
-	// unlock_range(fd);
+    	unlock_range(fd);
     } else {
         printf("invalid command\n");
 
