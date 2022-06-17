@@ -423,14 +423,14 @@ int ata_trusted(int fd, uint8_t *response, size_t response_len, int cmd, int pro
         printf("bad ioctl %s\n", strerror(errno));
     }
 
-    printf("sense:\n");
-    for (int i = 0 ; i < sizeof(sense); ++i) {
-        printf("%02x ", sense[i]);
+    if (sense[0] != 0 || sense[1] != 0) {
+        printf("got some sense:\n");
+        // https://en.wikipedia.org/wiki/Key_Code_Qualifier ...
+        for (int i = 0 ; i < sizeof(sense); ++i) {
+            printf("%02x ", sense[i]);
+        }
+        printf("\n");
     }
-printf("\n");
-    if (!((0x00 == sense[0]) && (0x00 == sense[1])))
-        if (!((0x72 == sense[0]) && (0x0b == sense[1])))  printf("NOK\n"); // not ATA response
-    printf ("ok: %02x\n", sense[11]);
 
     send_packet(response, response_len);
 
@@ -628,18 +628,18 @@ int get(unsigned char *buffer, size_t *i, unsigned char *invoking_id, size_t inv
     end_list(buffer, i);
     end_of_data(buffer, i);
     method_status_list(buffer, i);
-
-    *i += PADDING_ALIGNMENT - (*i % PADDING_ALIGNMENT); // padding
 }
 
-int locking_range(unsigned char *buffer, size_t *i, char read_lock_enabled, char write_lock_enabled, char read_locked, char write_locked)
+int locking_range(unsigned char *buffer, size_t *i, unsigned char locking_range_uid, char read_lock_enabled, char write_lock_enabled, char read_locked, char write_locked)
 {
     // Core: Table 226 Locking Table Description
     // Data Payload
     call_token(buffer, i);
     // https://trustedcomputinggroup.org/wp-content/uploads/TCG-Storage-Opal-SSC-v2p02-r1p0_pub24jan2022.pdf: Table 39 Locking SP
-    // Locking_Range1 UID
-    short_atom(buffer, i, 1, "\x00\x00\x08\x02\x00\x03\x00\x01", 8);
+    // Locking_RangeNNNN UID
+    char locking_range_uid_str[9] = "\x00\x00\x08\x02\x00\x03\x00\x00";
+    locking_range_uid_str[7] = locking_range_uid;
+    short_atom(buffer, i, 1, locking_range_uid_str, 8);
     // Set Method UID
     short_atom(buffer, i, 1, METHOD_UID_SET, 8);
     // [
@@ -702,7 +702,6 @@ int locking_range(unsigned char *buffer, size_t *i, char read_lock_enabled, char
 
 int end_session(unsigned char *buffer, size_t *i) {
     end_session_token(buffer, i);
-    *i += PADDING_ALIGNMENT - (*i % PADDING_ALIGNMENT); // padding
 }
 
 int start_session(unsigned char *buffer, size_t *i, unsigned char *SPID, size_t SPID_len, unsigned char *host_challenge,
@@ -786,8 +785,6 @@ int start_session(unsigned char *buffer, size_t *i, unsigned char *SPID, size_t 
     end_list(buffer, i);
     end_of_data(buffer, i);
     method_status_list(buffer, i);
-
-    *i += PADDING_ALIGNMENT - (*i % PADDING_ALIGNMENT); // padding
 }
 
 struct ComPacket {
@@ -850,24 +847,28 @@ void prepare_headers(unsigned char *buffer, size_t *i, uint64_t sp_session_id, u
 void finish_headers(unsigned char *buffer, size_t *i) {
     struct HeadersStruct *headers = (void *)(((unsigned char *)buffer));
 
-    headers->com_packet.length = swap_endian_32(*i - sizeof(struct ComPacket)); // swap_endian_32(0x7c);
-    headers->packet.length = swap_endian_32(swap_endian_32(headers->com_packet.length) - sizeof(struct Packet)); // swap_endian_32(0x64);
-    headers->data_subpacket.length = swap_endian_32(swap_endian_32(headers->packet.length) - sizeof(struct DataSubPacket)); // swap_endian_32(0x58);
+    headers->com_packet.length = swap_endian_32(*i - sizeof(struct ComPacket));
+    headers->packet.length = swap_endian_32(swap_endian_32(headers->com_packet.length) - sizeof(struct Packet));
+    headers->data_subpacket.length = swap_endian_32(swap_endian_32(headers->packet.length) - sizeof(struct DataSubPacket));
+
+    *i += PADDING_ALIGNMENT - (*i % PADDING_ALIGNMENT);
 }
 
-void unlock_range(int fd, char read_lock_enabled, char write_lock_enabled, char read_locked, char write_locked)
+char *dev = "hello";
+uint64_t HostSessionID = 0;
+uint64_t SPSessionID = 0;
+
+int init_session(int fd)
 {
     // Taking ownership of the storage device
     size_t i = 0;
     struct ComPacket *com_packet;
     struct Packet *packet;
     struct DataSubPacket *data_subpacket;
-    uint64_t HostSessionID = 0;
-    uint64_t SPSessionID = 0;
 
     printf("Unlock range:\n");
-    unsigned char buffer[4096] = {0};
-    unsigned char response[4096] = {0};
+    unsigned char buffer[4096] = { 0 };
+    unsigned char response[4096] = { 0 };
 
     printf("Discovery 0:\n");
     ata_discovery(fd);
@@ -875,12 +876,22 @@ void unlock_range(int fd, char read_lock_enabled, char write_lock_enabled, char 
 
     // StartSession
     {
-
         printf("Sending StartSession:\n");
         memset(buffer, 0, sizeof(buffer));
         i = 0;
-        prepare_headers(buffer, &i, SPSessionID, HostSessionID);
-        unsigned char *salted_hashed_etc_challenge = "\xc1\xef\x2a\xaa\xf6\xa6\xac\x7b\xd9\x79\x1c\xdb\x64\xf3\xac\x2a\x4f\x42\x96\xdd\xb4\x4f\x29\x98\x20\x87\xb7\xb3\xd8\xba\xa2\xa9";
+        prepare_headers(buffer, &i, SPSessionID, HostSessionID); //  01 f2 00 d0 20
+
+        unsigned char *salted_hashed_etc_challenge;
+        if (strcmp(dev, "/dev/sda") == 0) {
+            salted_hashed_etc_challenge =
+                    "\xc1\xef\x2a\xaa\xf6\xa6\xac\x7b\xd9\x79\x1c\xdb\x64\xf3\xac\x2a\x4f\x42\x96\xdd\xb4\x4f\x29\x98\x20\x87\xb7\xb3\xd8\xba\xa2\xa9";
+        } else if (strcmp(dev, "/dev/sdb") == 0) {
+            salted_hashed_etc_challenge =
+                    "\xc5\x80\xe7\x40\x14\xad\x88\x2c\xba\x75\xc6\x1c\x63\x70\xa0\x71\x49\xd7\x9b\x3d\x3e\xd3\xee\x53\x40\x92\x15\xdf\x53\xbf\xa6\x7a";
+        } else {
+            salted_hashed_etc_challenge =
+                    "\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77";
+        }
         start_session(buffer, &i, LOCKING_SP_UID, 8, salted_hashed_etc_challenge, 32, NULL, 0, ADMIN1_UID, 8);
         finish_headers(buffer, &i);
 
@@ -890,6 +901,20 @@ void unlock_range(int fd, char read_lock_enabled, char write_lock_enabled, char 
         memset(response, 0, sizeof(response));
         ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
 
+        for (int x = 0; x < 254; ++x) {
+            printf("%02x ", response[x]);
+        }
+        printf("\n");
+
+        // SMUID.SyncSession [
+        // HostSessionID : uinteger,
+        // SPSessionID : uinteger,
+        // SPChallenge = bytes,
+        // SPExchangeCert = bytes,
+        // SPSigningCert = bytes,
+        // TransTimeout = uinteger,
+        // InitialCredit = uinteger,
+        // SignedHash = bytes ]
         i = 0;
         i += sizeof(struct HeadersStruct); // headers
         i += 1; // call token
@@ -905,26 +930,23 @@ void unlock_range(int fd, char read_lock_enabled, char write_lock_enabled, char 
         i += 1; // end of data token
         // method status list
         printf("method status code: %s (%i)\n", MSC_to_string(response[i + 1]), response[i + 1]);
+        if (response[i + 1] != MSC_SUCCESS) {
+            return 1;
+        }
         i += 5;
     }
+    return 0;
+}
 
+void finish_session(int fd) {
+    size_t i = 0;
+    struct ComPacket *com_packet;
+    struct Packet *packet;
+    struct DataSubPacket *data_subpacket;
 
-    // unlock range
-    {
-
-        printf("Sending Set LockingRange1:\n");
-        memset(buffer, 0, sizeof(buffer));
-        i = 0;
-        prepare_headers(buffer, &i, SPSessionID, HostSessionID);
-        locking_range(buffer, &i, read_lock_enabled, write_lock_enabled, read_locked, write_locked);
-        finish_headers(buffer, &i);
-
-        ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
-
-        printf("Getting Set LockingRange1 Result:\n");
-        memset(response, 0, sizeof(response));
-        ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
-    }
+    printf("Unlock range:\n");
+    unsigned char buffer[4096] = { 0 };
+    unsigned char response[4096] = { 0 };
 
     // end session
     {
@@ -943,6 +965,45 @@ void unlock_range(int fd, char read_lock_enabled, char write_lock_enabled, char 
     }
 }
 
+void unlock_range(int fd, char read_lock_enabled, char write_lock_enabled, char read_locked, char write_locked)
+{
+    // Taking ownership of the storage device
+    size_t i = 0;
+    struct ComPacket *com_packet;
+    struct Packet *packet;
+    struct DataSubPacket *data_subpacket;
+    int rc = 0;
+
+    printf("Unlock range:\n");
+    unsigned char buffer[4096] = { 0 };
+    unsigned char response[4096] = { 0 };
+
+    if (rc == 0) {
+        init_session(fd);
+    }
+
+    if (rc == 0) {
+        printf("Sending Set LockingRange1:\n");
+        memset(buffer, 0, sizeof(buffer));
+        i = 0;
+        prepare_headers(buffer, &i, SPSessionID, HostSessionID);
+        locking_range(buffer, &i, 1, read_lock_enabled, write_lock_enabled, read_locked, write_locked);
+        finish_headers(buffer, &i);
+
+        ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
+
+        printf("Getting Set LockingRange1 Result:\n");
+        memset(response, 0, sizeof(response));
+        ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
+
+        // []
+    }
+
+    if (rc == 0) {
+        finish_session(fd);
+    }
+}
+
 int main(int argc, char **argv)
 {
     int err = 0;
@@ -950,6 +1011,7 @@ int main(int argc, char **argv)
 
     if (argc >= 3) {
         fd = open(argv[2], O_RDWR);
+        dev = argv[2];
     }
 
     if (strcmp(argv[1], "identify") == 0) {
