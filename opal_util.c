@@ -18,6 +18,12 @@
 #include <errno.h>
 #include <time.h>
 
+#include <argp.h>
+#include <stdbool.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdint.h>
+
 uint16_t base_comID = 0;
 
 #define DEFAULT_HOST_CHALLENGE                                                                                         \
@@ -743,7 +749,10 @@ int user_pin_set(unsigned char *buffer, size_t *i, unsigned char user_uid, char 
             {
                 start_name(buffer, i);
                 {
-                    printf("pin = 0x777777...\n");
+                    printf("new pin (%i):\n", user_pin_len);
+                    for (int x = 0; x < user_pin_len; ++x)
+                        printf("%02x ", user_pin[x]);
+                    printf("\n");
                     tiny_atom(buffer, i, 0, 3);
                     medium_atom(buffer, i, 1, user_pin, user_pin_len);
                 }
@@ -953,7 +962,7 @@ char *dev = "hello";
 uint64_t HostSessionID = 0;
 uint64_t SPSessionID = 0;
 
-int init_session(int fd, unsigned char *SPID, unsigned char user_id)
+int init_session(int fd, unsigned char *SPID, unsigned char user_id, unsigned char *challenge, size_t challenge_len)
 {
     // Taking ownership of the storage device
     size_t i = 0;
@@ -976,22 +985,16 @@ int init_session(int fd, unsigned char *SPID, unsigned char user_id)
         i = 0;
         prepare_headers(buffer, &i, 0, 0); //  01 f2 00 d0 20
 
-        unsigned char *salted_hashed_etc_challenge = DEFAULT_HOST_CHALLENGE;
+        unsigned char *salted_hashed_etc_challenge = challenge;
         if (user_id == 0) {
-            if (strcmp(dev, "/dev/sda") == 0) {
-                salted_hashed_etc_challenge = DEFAULT_SDA_HOST_CHALLENGE;
-            } else if (strcmp(dev, "/dev/sdb") == 0) {
-                salted_hashed_etc_challenge = DEFAULT_SDB_HOST_CHALLENGE;
-            }
-            start_session(buffer, &i, SPID, 8, salted_hashed_etc_challenge, 32, NULL, 0, ADMIN1_UID, 8);
+            unsigned char signing_auth[9] = ADMIN1_UID;
+            start_session(buffer, &i, SPID, 8, salted_hashed_etc_challenge, challenge_len, NULL, 0, signing_auth, 8);
         } else {
-            printf("INITED SESSION AS A USER %i!\n", user_id);
             unsigned char signing_auth[9] = "\x00\x00\x00\x09\x00\x03\x00\x00";
             signing_auth[7] = user_id;
-            start_session(buffer, &i, SPID, 8, DEFAULT_HOST_CHALLENGE, 32, NULL, 0, signing_auth, 8);
+            start_session(buffer, &i, SPID, 8, salted_hashed_etc_challenge, challenge_len, NULL, 0, signing_auth, 8);
         }
         finish_headers(buffer, &i);
-
         ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
 
         printf("Getting SyncSession:\n");
@@ -1061,7 +1064,7 @@ void finish_session(int fd)
 }
 
 void unlock_range(int fd, unsigned char locking_range_uid, unsigned char user_uid, char read_lock_enabled,
-                  char write_lock_enabled, char read_locked, char write_locked)
+                  char write_lock_enabled, char read_locked, char write_locked, char *challenge, size_t challenge_len)
 {
     int rc = 0;
 
@@ -1071,7 +1074,7 @@ void unlock_range(int fd, unsigned char locking_range_uid, unsigned char user_ui
     size_t i = 0;
 
     if (rc == 0) {
-        init_session(fd, LOCKING_SP_UID, user_uid);
+        init_session(fd, LOCKING_SP_UID, user_uid, challenge, challenge_len);
     }
 
     if (rc == 0) {
@@ -1103,7 +1106,7 @@ void unlock_range(int fd, unsigned char locking_range_uid, unsigned char user_ui
     }
 }
 
-void setup_range(int fd, unsigned char locking_range_uid)
+void setup_range(int fd, unsigned char locking_range_uid, unsigned char *challenge, size_t challenge_len)
 {
     size_t i = 0;
     int rc = 0;
@@ -1113,7 +1116,7 @@ void setup_range(int fd, unsigned char locking_range_uid)
     unsigned char response[4096] = { 0 };
 
     if (rc == 0) {
-        init_session(fd, LOCKING_SP_UID, 0);
+        init_session(fd, LOCKING_SP_UID, 0, challenge, challenge_len);
     }
 
     if (rc == 0) {
@@ -1297,7 +1300,7 @@ void setup_range(int fd, unsigned char locking_range_uid)
     }
 }
 
-void setup_user(int fd, int user_uid, char *user_pin, int user_pin_len)
+void setup_user(int fd, int user_uid, char *admin_pin, int admin_pin_len, char *user_pin, int user_pin_len)
 {
     size_t i = 0;
     int rc = 0;
@@ -1307,7 +1310,7 @@ void setup_user(int fd, int user_uid, char *user_pin, int user_pin_len)
     unsigned char response[4096] = { 0 };
 
     if (rc == 0) {
-        init_session(fd, LOCKING_SP_UID, 0);
+        init_session(fd, LOCKING_SP_UID, 0, admin_pin, admin_pin_len);
     }
 
     if (rc == 0) {
@@ -1353,50 +1356,173 @@ void setup_user(int fd, int user_uid, char *user_pin, int user_pin_len)
     }
 }
 
+#define VAL_UNDEFINED (-1)
 
+static struct argp_option options[] = { { "verify-pin", 'v', "verify_pin" },
+                                        { "assign-pin", 'a', "assign_pin" },
+                                        { "user", 'u', "user" },
+                                        { "locking-range", 'l', "locking_range" },
+                                        { "read-lock-enabled", 'R', "state" },
+                                        { "write-lock-enabled", 'W', "state" },
+                                        { "read-locked", 'r', "state" },
+                                        { "write-locked", 'w', "state" },
+                                        { 0 } };
 
-int main(int argc, char **argv)
+struct Arguments {
+    enum { NONE, CMD_IDENTIFY, CMD_DISCOVERY, CMD_UNLOCK, CMD_SETUP_RANGE, CMD_SETUP_USER } command;
+    char *device;
+    uint16_t locking_range;
+    uint16_t user;
+    unsigned char verify_pin[512];
+    size_t verify_pin_len;
+    unsigned char assign_pin[512];
+    size_t assign_pin_len;
+    int8_t read_lock_enabled;
+    int8_t write_lock_enabled;
+    int8_t read_locked;
+    int8_t write_locked;
+
+    size_t parsed_;
+} arguments = {
+    .read_lock_enabled = VAL_UNDEFINED,
+    .write_lock_enabled = VAL_UNDEFINED,
+    .read_locked = VAL_UNDEFINED,
+    .write_locked = VAL_UNDEFINED,
+};
+
+static error_t parse_hex(const char *source, unsigned char *target, size_t *target_len)
 {
-    int err = 0;
-    int fd = 0;
+    while (source[0] != 0) {
+        if (source[1] == 0) {
+            return 1;
+        }
 
-    if (argc >= 3) {
-        fd = open(argv[2], O_RDWR);
-        dev = argv[2];
+        char source_0 = source[0];
+        if (source_0 >= '0' && source_0 <= '9') {
+            source_0 = source_0 - '0';
+        } else if (source_0 >= 'a' && source_0 <= 'f') {
+            source_0 = source_0 - 'a' + 10;
+        } else {
+            return 1;
+        }
+        char source_1 = source[1];
+        if (source_1 >= '0' && source_1 <= '9') {
+            source_1 = source_1 - '0';
+        } else if (source_1 >= 'a' && source_1 <= 'f') {
+            source_1 = source_1 - 'a' + 10;
+        } else {
+            return 1;
+        }
+        target[0] = source_0 << 4 | source_1;
+
+        source += 2;
+        target += 1;
+        *target_len += 1;
     }
 
-    if (strcmp(argv[1], "nvme_identify") == 0) {
+    return 0;
+}
+
+static error_t parse_bool(const char *source, int8_t *target)
+{
+    if (source[0] == '0' && source[1] == 0) {
+        *target = 0;
+    } else if (source[0] == '1' && source[1] == 0) {
+        *target = 1;
+    } else {
+        return 1;
+    }
+
+    return 0;
+}
+
+static error_t parse_opt(int key, char *arg, struct argp_state *state)
+{
+    struct Arguments *args = state->input;
+
+    switch (key) {
+    case 'u':
+        args->user = strtol(arg, NULL, 10);
+        break;
+    case 'l':
+        args->locking_range = strtol(arg, NULL, 10);
+        break;
+    case 'v':
+        return parse_hex(arg, args->verify_pin, &args->verify_pin_len);
+    case 'a':
+        return parse_hex(arg, args->assign_pin, &args->assign_pin_len);
+    case 'R':
+        return parse_bool(arg, &args->read_lock_enabled);
+    case 'W':
+        return parse_bool(arg, &args->write_lock_enabled);
+    case 'r':
+        return parse_bool(arg, &args->read_locked);
+    case 'w':
+        return parse_bool(arg, &args->write_locked);
+    case ARGP_KEY_ARG:
+        switch (args->parsed_) {
+        case 0:
+            if (strcmp(arg, "identify") == 0) {
+                args->command = CMD_IDENTIFY;
+            } else if (strcmp(arg, "discovery") == 0) {
+                args->command = CMD_DISCOVERY;
+            } else if (strcmp(arg, "unlock") == 0) {
+                args->command = CMD_UNLOCK;
+            } else if (strcmp(arg, "setup_range") == 0) {
+                args->command = CMD_SETUP_RANGE;
+            } else if (strcmp(arg, "setup_user") == 0) {
+                args->command = CMD_SETUP_USER;
+            } else {
+                return ARGP_ERR_UNKNOWN;
+            }
+            break;
+        case 1:
+            args->device = arg;
+            dev = arg;
+            break;
+        default:
+            return ARGP_ERR_UNKNOWN;
+        }
+        args->parsed_ += 1;
+        break;
+    default:
+        return ARGP_ERR_UNKNOWN;
+    }
+
+    return 0;
+}
+
+int main(int argc, char *argv[])
+{
+    struct argp argp = { options, parse_opt, "device", "Tool for controlling OPAL-based disks.", 0, 0, 0 };
+    error_t err = argp_parse(&argp, argc, argv, 0, 0, &arguments);
+    if (err != 0 || arguments.parsed_ < 2) {
+        printf("could not parse args || not enough args\n");
+        return 1;
+    }
+
+    int fd = open(arguments.device, O_RDWR);
+
+    if (arguments.command == CMD_IDENTIFY) {
         return nvme_identify(fd);
-    } else if (strcmp(argv[1], "discovery") == 0) {
+    } else if (arguments.command == CMD_IDENTIFY) {
         ata_discovery(fd);
-    } else if (strcmp(argv[1], "admin_unlock") == 0) {
-        char args[4] = { 0 };
-        for (int i = 0; i < 4; ++i) {
-            args[i] = argv[3][i] == '0' ? 0 : argv[3][i] == '1' ? 1 : -1;
-        }
-        unlock_range(fd, 1, 0, args[0], args[1], args[2], args[3]);
-    } else if (strcmp(argv[1], "user_unlock") == 0) {
-        char args[4] = { 0 };
-        for (int i = 0; i < 4; ++i) {
-            args[i] = argv[3][i] == '0' ? 0 : argv[3][i] == '1' ? 1 : -1;
-        }
-        unlock_range(fd, 1, 1, args[0], args[1], args[2], args[3]);
-    } else if (strcmp(argv[1], "setup_range") == 0) {
-        setup_range(fd, 1);
-    } else if (strcmp(argv[1], "setup_user") == 0) {
-        setup_user(
-                fd, 1,
-                "\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77",
-                32);
+    } else if (arguments.command == CMD_UNLOCK) {
+        unlock_range(fd, arguments.locking_range, arguments.user, arguments.read_lock_enabled,
+                     arguments.write_lock_enabled, arguments.read_locked, arguments.write_locked, arguments.verify_pin,
+                     arguments.verify_pin_len);
+    } else if (arguments.command == CMD_SETUP_RANGE) {
+        setup_range(fd, arguments.locking_range, arguments.verify_pin, arguments.verify_pin_len);
+    } else if (arguments.command == CMD_SETUP_USER) {
+        setup_user(fd, arguments.user, arguments.verify_pin, arguments.verify_pin_len, arguments.assign_pin,
+                   arguments.assign_pin_len);
     } else {
         printf("invalid command\n");
 
         err = 1;
     }
 
-    if (argc == 3) {
-        close(fd);
-    }
+    close(fd);
 
     return err;
 }
