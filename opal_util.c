@@ -769,6 +769,81 @@ int locking_range_set(unsigned char *buffer, size_t *i, unsigned char locking_ra
     method_status_list(buffer, i);
 }
 
+
+int user_pin_set(unsigned char *buffer, size_t *i, unsigned char user_uid)
+{
+    call_token(buffer, i);
+    char user_uid_str[9] = "\x00\x00\x00\x0b\x00\x03\x00\x00";
+    user_uid_str[7] = user_uid;
+    short_atom(buffer, i, 1, user_uid_str, 8);
+    // Set Method UID
+    short_atom(buffer, i, 1, METHOD_UID_SET, 8);
+    // [
+    start_list(buffer, i);
+    {
+        // "Values" = [...]
+        start_name_list(buffer, i);
+        {
+            tiny_atom(buffer, i, 0, 1);
+            // [
+            start_list(buffer, i);
+            {
+                start_name_list(buffer, i);
+                {
+                    printf("pin = 0x777777...\n");
+                    tiny_atom(buffer, i, 0, 3);
+                    medium_atom(buffer, i, 1, "\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77", 16);
+                }
+                end_name_list(buffer, i);
+            }
+            // ]
+            end_list(buffer, i);
+        }
+        end_name_list(buffer, i);
+    }
+    // ]
+    end_list(buffer, i);
+    end_of_data(buffer, i);
+    method_status_list(buffer, i);
+}
+
+int user_set(unsigned char *buffer, size_t *i, unsigned char user_uid)
+{
+    call_token(buffer, i);
+    char user_uid_str[9] = "\x00\x00\x00\x09\x00\x03\x00\x00"; // Locking SP Authority Table User1 UID
+    user_uid_str[7] = user_uid;
+    short_atom(buffer, i, 1, user_uid_str, 8);
+    // Set Method UID
+    short_atom(buffer, i, 1, METHOD_UID_SET, 8);
+    // [
+    start_list(buffer, i);
+    {
+        // "Values" = [...]
+        start_name_list(buffer, i);
+        {
+            tiny_atom(buffer, i, 0, 1);
+            // [
+            start_list(buffer, i);
+            {
+                start_name_list(buffer, i);
+                {
+                    printf("enabled = 1\n");
+                    tiny_atom(buffer, i, 0, 5);
+                    tiny_atom(buffer, i, 0, 1);
+                }
+                end_name_list(buffer, i);
+            }
+            // ]
+            end_list(buffer, i);
+        }
+        end_name_list(buffer, i);
+    }
+    // ]
+    end_list(buffer, i);
+    end_of_data(buffer, i);
+    method_status_list(buffer, i);
+}
+
 int end_session(unsigned char *buffer, size_t *i) {
     end_session_token(buffer, i);
 }
@@ -921,7 +996,7 @@ char *dev = "hello";
 uint64_t HostSessionID = 0;
 uint64_t SPSessionID = 0;
 
-int init_session(int fd, unsigned char *SPID)
+int init_session(int fd, unsigned char *SPID, unsigned char user_id)
 {
     // Taking ownership of the storage device
     size_t i = 0;
@@ -944,18 +1019,22 @@ int init_session(int fd, unsigned char *SPID)
         i = 0;
         prepare_headers(buffer, &i, 0, 0); //  01 f2 00 d0 20
 
-        unsigned char *salted_hashed_etc_challenge;
-        if (strcmp(dev, "/dev/sda") == 0) {
-            salted_hashed_etc_challenge =
-                    "\xc1\xef\x2a\xaa\xf6\xa6\xac\x7b\xd9\x79\x1c\xdb\x64\xf3\xac\x2a\x4f\x42\x96\xdd\xb4\x4f\x29\x98\x20\x87\xb7\xb3\xd8\xba\xa2\xa9";
-        } else if (strcmp(dev, "/dev/sdb") == 0) {
-            salted_hashed_etc_challenge =
-                    "\xc5\x80\xe7\x40\x14\xad\x88\x2c\xba\x75\xc6\x1c\x63\x70\xa0\x71\x49\xd7\x9b\x3d\x3e\xd3\xee\x53\x40\x92\x15\xdf\x53\xbf\xa6\x7a";
+        unsigned char *salted_hashed_etc_challenge = "\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77";
+        if (user_id == 0) {
+            if (strcmp(dev, "/dev/sda") == 0) {
+                salted_hashed_etc_challenge =
+                        "\xc1\xef\x2a\xaa\xf6\xa6\xac\x7b\xd9\x79\x1c\xdb\x64\xf3\xac\x2a\x4f\x42\x96\xdd\xb4\x4f\x29\x98\x20\x87\xb7\xb3\xd8\xba\xa2\xa9";
+            } else if (strcmp(dev, "/dev/sdb") == 0) {
+                salted_hashed_etc_challenge =
+                        "\xc5\x80\xe7\x40\x14\xad\x88\x2c\xba\x75\xc6\x1c\x63\x70\xa0\x71\x49\xd7\x9b\x3d\x3e\xd3\xee\x53\x40\x92\x15\xdf\x53\xbf\xa6\x7a";
+            }
+            start_session(buffer, &i, SPID, 8, salted_hashed_etc_challenge, 32, NULL, 0, ADMIN1_UID, 8);
         } else {
-            salted_hashed_etc_challenge =
-                    "\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77";
+            printf("INITED SESSION AS A USER %i!\n", user_id);
+            unsigned char signing_auth[9] = "\x00\x00\x00\x09\x00\x03\x00\x00";
+            signing_auth[7] = user_id;
+            start_session(buffer, &i, SPID, 8, "\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77", 16, NULL, 0, signing_auth, 8);
         }
-        start_session(buffer, &i, SPID, 8, salted_hashed_etc_challenge, 32, NULL, 0, ADMIN1_UID, 8);
         finish_headers(buffer, &i);
 
         ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
@@ -1025,6 +1104,54 @@ void finish_session(int fd) {
     }
 }
 
+
+void user_unlock_range(int fd, unsigned char locking_range_uid, char read_lock_enabled, char write_lock_enabled,
+                  char read_locked, char write_locked)
+{
+    size_t i = 0;
+    struct ComPacket *com_packet;
+    struct Packet *packet;
+    struct DataSubPacket *data_subpacket;
+    int rc = 0;
+
+    printf("Unlock range:\n");
+    unsigned char buffer[4096] = { 0 };
+    unsigned char response[4096] = { 0 };
+
+    if (rc == 0) {
+        init_session(fd, LOCKING_SP_UID, 1);
+    }
+
+    if (rc == 0) {
+        printf("Sending Set LockingRange1:\n");
+        memset(buffer, 0, sizeof(buffer));
+        i = 0;
+        prepare_headers(buffer, &i, SPSessionID, HostSessionID);
+        locking_range_set(buffer, &i, 1, -1, -1, read_lock_enabled, write_lock_enabled, read_locked, write_locked);
+        finish_headers(buffer, &i);
+
+        ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
+
+        printf("Getting Set LockingRange1 Result:\n");
+        memset(response, 0, sizeof(response));
+        ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
+
+        // -> []
+        i = 0;
+        i += sizeof(struct HeadersStruct);
+        i += 1; // start list token
+        i += 1; // end list token
+        i += 1; // end of data token
+        // method status list
+        printf("method status code: %s (%i)\n", MSC_to_string(response[i + 1]), response[i + 1]);
+        printf("\n");
+    }
+
+    if (rc == 0) {
+        finish_session(fd);
+    }
+}
+
 void unlock_range(int fd, unsigned char locking_range_uid, char read_lock_enabled, char write_lock_enabled,
                   char read_locked, char write_locked)
 {
@@ -1039,7 +1166,7 @@ void unlock_range(int fd, unsigned char locking_range_uid, char read_lock_enable
     unsigned char response[4096] = { 0 };
 
     if (rc == 0) {
-        init_session(fd, LOCKING_SP_UID);
+        init_session(fd, LOCKING_SP_UID, 0);
     }
 
     if (rc == 0) {
@@ -1085,7 +1212,7 @@ void setup_range(int fd, unsigned char locking_range_uid)
     unsigned char response[4096] = { 0 };
 
     if (rc == 0) {
-        init_session(fd, LOCKING_SP_UID);
+        init_session(fd, LOCKING_SP_UID, 0);
     }
 
     if (rc == 0) {
@@ -1157,7 +1284,7 @@ void setup_range(int fd, unsigned char locking_range_uid)
         memset(buffer, 0, sizeof(buffer));
         i = 0;
         prepare_headers(buffer, &i, SPSessionID, HostSessionID);
-        int j = i;
+        size_t j = i;
         {
             size_t *i = &j;
             call_token(buffer, i);
@@ -1179,6 +1306,79 @@ void setup_range(int fd, unsigned char locking_range_uid)
 
     if (rc == 0) {
         // Gives access to multiple users to read-unlock the range (User1 and User2)
+        printf("Sending give access to read-unlock:\n");
+        memset(buffer, 0, sizeof(buffer));
+        i = 0;
+        prepare_headers(buffer, &i, SPSessionID, HostSessionID);
+        size_t j = i;
+        {
+            size_t *i = &j;
+            call_token(buffer, i);
+            char ace_uid[9] = "\x00\x00\x00\x08\x00\x03\xe0\x00";
+            ace_uid[7] = locking_range_uid;
+            short_atom(buffer, i, 1, ace_uid, 8);
+            short_atom(buffer, i, 1, METHOD_UID_SET, 8);
+            start_list(buffer, i);
+            {
+                // "Values" = [...]
+                start_name_list(buffer, i);
+                {
+                    tiny_atom(buffer, i, 0, 1);
+                    // [
+                    start_list(buffer, i);
+                    {
+                        start_name_list(buffer, i);
+                        {
+                            tiny_atom(buffer, i, 0, 3); // BooleanExpr
+                            start_list(buffer, i); 
+                            {
+                                start_name_list(buffer, i);
+                                {
+                                    short_atom(buffer, i, 1, "\x00\x00\x0c\x05", 4); // Authority_object_ref
+                                    short_atom(buffer, i, 1, "\x00\x00\x00\x09\x00\x03\x00\x01", 8); // user 1 uid
+                                }
+                                end_name_list(buffer, i);
+                                start_name_list(buffer, i);
+                                {
+                                    short_atom(buffer, i, 1, "\x00\x00\x0c\x05", 4); // Authority_object_ref
+                                    short_atom(buffer, i, 1, "\x00\x00\x00\x09\x00\x03\x00\x02", 8); // user 2 uid
+                                }
+                                end_name_list(buffer, i);
+                                start_name_list(buffer, i);
+                                {
+                                    short_atom(buffer, i, 1, "\x00\x00\x04\x0e", 4); // bolean_ace
+                                    tiny_atom(buffer, i, 0, 0x01); // or
+                                }
+                                end_name_list(buffer, i);
+                            }
+                            end_list(buffer, i);
+                        }
+                        end_name_list(buffer, i);
+                    }
+                    // ]
+                    end_list(buffer, i);
+                }
+                end_name_list(buffer, i);
+            }
+            end_list(buffer, i);
+            end_of_data(buffer, i);
+            method_status_list(buffer, i);
+        }
+        i = j;
+        finish_headers(buffer, &i);
+        ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
+
+                for (int x= 0; x < 254 ;++x ) {
+                    printf("%02x ", buffer[x]);
+                }printf("\n");
+
+        printf("Getting ...:\n");
+        memset(response, 0, sizeof(response));
+        ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
+
+        for (int x= 0; x < 254 ;++x ) {
+            printf("%02x ", response[x]);
+        }printf("\n");
     }
 
     if (rc == 0) {
@@ -1187,6 +1387,65 @@ void setup_range(int fd, unsigned char locking_range_uid)
 
     if (rc == 0) {
         // Locks for read and write, by setting ReadLocked and WriteLocked for this range to TRUE
+    }
+
+    if (rc == 0) {
+        finish_session(fd);
+    }
+}
+
+void setup_user(int fd) {
+    
+    size_t i = 0;
+    struct ComPacket *com_packet;
+    struct Packet *packet;
+    struct DataSubPacket *data_subpacket;
+    int rc = 0;
+
+    printf("Unlock range:\n");
+    unsigned char buffer[4096] = { 0 };
+    unsigned char response[4096] = { 0 };
+
+    if (rc == 0) {
+        init_session(fd, LOCKING_SP_UID, 0);
+    }
+
+    if (rc == 0) {
+        // Enable the User1 authority
+        printf("Sending Enable the User1 authority:\n");
+        memset(buffer, 0, sizeof(buffer));
+        i = 0;
+        prepare_headers(buffer, &i, SPSessionID, HostSessionID);
+        user_set(buffer, &i, 1);
+        finish_headers(buffer, &i);
+        ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
+
+        printf("Getting Enable the User1 authority:\n");
+        memset(response, 0, sizeof(response));
+        ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
+    }
+
+    if (rc == 0) {
+        // Set User1 pin
+        printf("Sending Set User1 pin:\n");
+        memset(buffer, 0, sizeof(buffer));
+        i = 0;
+        prepare_headers(buffer, &i, SPSessionID, HostSessionID);
+        user_pin_set(buffer, &i, 1);
+        finish_headers(buffer, &i);
+        for (int x = 0; x < 256; x++) {
+            printf("%02x ", buffer[x]);
+        }
+        printf("\n");
+        ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
+
+        printf("Getting Set User1 pin:\n");
+        memset(response, 0, sizeof(response));
+        ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
+        for (int x = 0; x < 256; x++) {
+            printf("%02x ", response[x]);
+        }
+        printf("\n");
     }
 
     if (rc == 0) {
@@ -1216,8 +1475,16 @@ int main(int argc, char **argv)
             args[i] = argv[3][i] == '0' ? 0 : argv[3][i] == '1' ? 1 : -1;
         }
         unlock_range(fd, 1, args[0], args[1], args[2], args[3]);
+    }else if (strcmp(argv[1], "user_unlock") == 0) {
+        char args[4] = { 0 };
+        for (int i = 0; i < 4; ++i) {
+            args[i] = argv[3][i] == '0' ? 0 : argv[3][i] == '1' ? 1 : -1;
+        }
+        user_unlock_range(fd, 1, args[0], args[1], args[2], args[3]);
     } else if (strcmp(argv[1], "setup") == 0) {
         setup_range(fd, 1);
+    } else if (strcmp(argv[1], "user") == 0) {
+        setup_user(fd);
     } else {
         printf("invalid command\n");
 
