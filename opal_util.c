@@ -20,16 +20,15 @@
 
 uint16_t base_comID = 0;
 
-
-void send_packet(const unsigned char *buffer, size_t buffer_len)
-{
-    return;
-    printf("%i:\n", buffer_len);
-    for (int j = 0; j < buffer_len; ++j) {
-        printf("%02x ", buffer[j]);
-    }
-    printf("\n");
-}
+#define DEFAULT_HOST_CHALLENGE                                                                                         \
+    (unsigned char                                                                                                     \
+             *)"\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77"
+#define DEFAULT_SDA_HOST_CHALLENGE                                                                                     \
+    (unsigned char                                                                                                     \
+             *)"\xc1\xef\x2a\xaa\xf6\xa6\xac\x7b\xd9\x79\x1c\xdb\x64\xf3\xac\x2a\x4f\x42\x96\xdd\xb4\x4f\x29\x98\x20\x87\xb7\xb3\xd8\xba\xa2\xa9"
+#define DEFAULT_SDB_HOST_CHALLENGE                                                                                     \
+    (unsigned char                                                                                                     \
+             *)"\xc5\x80\xe7\x40\x14\xad\x88\x2c\xba\x75\xc6\x1c\x63\x70\xa0\x71\x49\xd7\x9b\x3d\x3e\xd3\xee\x53\x40\x92\x15\xdf\x53\xbf\xa6\x7a"
 
 /* msleep(): Sleep for the requested number of milliseconds. */
 int msleep(long msec)
@@ -37,8 +36,7 @@ int msleep(long msec)
     struct timespec ts;
     int res;
 
-    if (msec < 0)
-    {
+    if (msec < 0) {
         errno = EINVAL;
         return -1;
     }
@@ -61,12 +59,17 @@ int msleep(long msec)
 // https://trustedcomputinggroup.org/wp-content/uploads/TCG_Storage_Architecture_Core_Spec_v2.01_r1.00.pdf
 // Table 242 MethodID UIDs
 #define METHOD_UID_START_SESSION "\x00\x00\x00\x00\x00\x00\xff\x02"
-#define METHOD_UID_GET           "\x00\x00\x00\x06\x00\x00\x00\x16"
-#define METHOD_UID_SET           "\x00\x00\x00\x06\x00\x00\x00\x17"
+#define METHOD_UID_GET "\x00\x00\x00\x06\x00\x00\x00\x16"
+#define METHOD_UID_SET "\x00\x00\x00\x06\x00\x00\x00\x17"
 
-#define SMUID          "\x00\x00\x00\x00\x00\x00\x00\xff"
+#define SMUID "\x00\x00\x00\x00\x00\x00\x00\xff"
 #define LOCKING_SP_UID "\x00\x00\x02\x05\x00\x00\x00\x02"
-#define ADMIN1_UID     "\x00\x00\x00\x09\x00\x01\x00\x01"
+#define ADMIN1_UID "\x00\x00\x00\x09\x00\x01\x00\x01"
+
+// https://trustedcomputinggroup.org/wp-content/uploads/TCG-Storage-Opal-SSC-v2p02-r1p0_pub24jan2022.pdf
+// Table 39 Locking SP
+#define LOCKING_RANGE_NNNN_UID "\x00\x00\x08\x02\x00\x03\x00\x00"
+#define LOCKING_TABLE_ACTIVE_KEY 0xa
 
 // Table 166 Status Codes
 enum MethodStatusCode {
@@ -91,25 +94,43 @@ enum MethodStatusCode {
     MSC_FAIL = 0x3F,
 };
 
-const char *MSC_to_string(enum MethodStatusCode msc) {
+const char *MSC_to_string(enum MethodStatusCode msc)
+{
     switch (msc) {
-        case MSC_SUCCESS: return "MSC_SUCCESS";
-        case MSC_NOT_AUTHORIZED: return "MSC_NOT_AUTHORIZED";
-        case MSC_SP_BUSY: return "MSC_SP_BUSY";
-        case MSC_SP_FAILED: return "MSC_SP_FAILED";
-        case MSC_SP_DISABLED: return "MSC_SP_DISABLED";
-        case MSC_SP_FROZEN: return "MSC_SP_FROZEN";
-        case MSC_NO_SESSIONS_AVAILABLE: return "MSC_NO_SESSIONS_AVAILABLE";
-        case MSC_UNIQUENESS_CONFLICT: return "MSC_UNIQUENESS_CONFLICT";
-        case MSC_INSUFFICIENT_SPACE: return "MSC_INSUFFICIENT_SPACE";
-        case MSC_INSUFFICIENT_ROWS: return "MSC_INSUFFICIENT_ROWS";
-        case MSC_INVALID_PARAMETER: return "MSC_INVALID_PARAMETER";
-        case MSC_TPER_MALFUNCTION: return "MSC_TPER_MALFUNCTION";
-        case MSC_TRANSACTION_FAILURE: return "MSC_TRANSACTION_FAILURE";
-        case MSC_RESPONSE_OVERFLOW: return "MSC_RESPONSE_OVERFLOW";
-        case MSC_AUTHORITY_LOCKED_OUT: return "MSC_AUTHORITY_LOCKED_OUT";
-        case MSC_FAIL: return "MSC_FAIL";
-        default: return "YIKES";
+    case MSC_SUCCESS:
+        return "MSC_SUCCESS";
+    case MSC_NOT_AUTHORIZED:
+        return "MSC_NOT_AUTHORIZED";
+    case MSC_SP_BUSY:
+        return "MSC_SP_BUSY";
+    case MSC_SP_FAILED:
+        return "MSC_SP_FAILED";
+    case MSC_SP_DISABLED:
+        return "MSC_SP_DISABLED";
+    case MSC_SP_FROZEN:
+        return "MSC_SP_FROZEN";
+    case MSC_NO_SESSIONS_AVAILABLE:
+        return "MSC_NO_SESSIONS_AVAILABLE";
+    case MSC_UNIQUENESS_CONFLICT:
+        return "MSC_UNIQUENESS_CONFLICT";
+    case MSC_INSUFFICIENT_SPACE:
+        return "MSC_INSUFFICIENT_SPACE";
+    case MSC_INSUFFICIENT_ROWS:
+        return "MSC_INSUFFICIENT_ROWS";
+    case MSC_INVALID_PARAMETER:
+        return "MSC_INVALID_PARAMETER";
+    case MSC_TPER_MALFUNCTION:
+        return "MSC_TPER_MALFUNCTION";
+    case MSC_TRANSACTION_FAILURE:
+        return "MSC_TRANSACTION_FAILURE";
+    case MSC_RESPONSE_OVERFLOW:
+        return "MSC_RESPONSE_OVERFLOW";
+    case MSC_AUTHORITY_LOCKED_OUT:
+        return "MSC_AUTHORITY_LOCKED_OUT";
+    case MSC_FAIL:
+        return "MSC_FAIL";
+    default:
+        return "YIKES";
     }
 }
 
@@ -309,7 +330,7 @@ void tcg_discovery_0_process_feature(void *data, int feature_code)
                swap_endian_16(body->number_of_locking_admin_authorities_supported),
                swap_endian_16(body->number_of_locking_user_authorities_supported));
 
-               base_comID = swap_endian_16(body->base_comID);
+        base_comID = swap_endian_16(body->base_comID);
     } else {
         printf("unimplemented feature %i\n", feature_code);
     }
@@ -396,7 +417,7 @@ int ata_trusted(int fd, uint8_t *response, size_t response_len, int cmd, int pro
         .trusted_receive.sp_specific = comID,
         .trusted_receive.command = cmd,
     };
-    uint8_t sense[32] = {0};
+    uint8_t sense[32] = { 0 };
 
     sg_io_hdr_t sg = {
         .interface_id = 'S',
@@ -407,29 +428,9 @@ int ata_trusted(int fd, uint8_t *response, size_t response_len, int cmd, int pro
         .dxfer_len = response_len,
         .timeout = 10000,
 
-            .mx_sb_len = sizeof (sense),
-    .sbp = sense,
-
-        // todo: figure out sense
+        .mx_sb_len = sizeof(sense),
+        .sbp = sense,
     };
-
-
-    // printf("sendCommand(cmd: %i, protocol: %i, comID: %i)\n", cmd, protocol, comID);
-
-    // printf("\nsg:\n");
-    // for (unsigned int i = 0; i < sizeof(sg); ++i) {
-    //     printf("%02x ", ((unsigned char *)&sg)[i]);
-    // }
-    // printf("\ncdb:\n");
-    // for (unsigned int i = 0; i < sizeof(cdb); ++i) {
-    //     printf("%02x ", ((unsigned char *)&cdb)[i]);
-    // }
-    // printf("\nbuffer:\n");
-    // for (unsigned int i = 0; i < response_len; ++i) {
-    //     printf("%02x ", ((unsigned char *)response)[i]);
-    // }
-    // printf("\n\n");
-
 
     if (ioctl(fd, SG_IO, &sg) < 0) {
         printf("bad ioctl %s\n", strerror(errno));
@@ -438,14 +439,11 @@ int ata_trusted(int fd, uint8_t *response, size_t response_len, int cmd, int pro
     if (sense[0] != 0 || sense[1] != 0) {
         printf("got some sense:\n");
         // https://en.wikipedia.org/wiki/Key_Code_Qualifier ...
-        for (int i = 0 ; i < sizeof(sense); ++i) {
+        for (int i = 0; i < sizeof(sense); ++i) {
             printf("%02x ", sense[i]);
         }
         printf("\n");
     }
-
-    send_packet(response, response_len);
-
 }
 
 int nvme_send(int fd, unsigned char *response, size_t response_len)
@@ -489,30 +487,31 @@ int nvme_send(int fd, unsigned char *response, size_t response_len)
 #define END_NAME_TOKEN 0xf3
 #define CALL_TOKEN 0xf8
 #define END_OF_DATA_TOKEN 0xf9
+#define END_OF_SESSION_TOKEN 0xfa
 
 #define PADDING_ALIGNMENT 512
 
 void start_list(unsigned char *buffer, size_t *i)
 {
-    buffer[*i] = 0xf0;
+    buffer[*i] = START_LIST_TOKEN;
     *i += 1;
 }
 
 void end_list(unsigned char *buffer, size_t *i)
 {
-    buffer[*i] = 0xf1;
+    buffer[*i] = END_LIST_TOKEN;
     *i += 1;
 }
 
-void start_name_list(unsigned char *buffer, size_t *i)
+void start_name(unsigned char *buffer, size_t *i)
 {
-    buffer[*i] = 0xf2;
+    buffer[*i] = START_NAME_TOKEN;
     *i += 1;
 }
 
 void end_name_list(unsigned char *buffer, size_t *i)
 {
-    buffer[*i] = 0xf3;
+    buffer[*i] = END_NAME_TOKEN;
     *i += 1;
 }
 
@@ -524,24 +523,25 @@ void call_token(unsigned char *buffer, size_t *i)
 
 void end_of_data(unsigned char *buffer, size_t *i)
 {
-    buffer[*i] = 0xf9;
+    buffer[*i] = END_OF_DATA_TOKEN;
     *i += 1;
 }
 
 void end_session_token(unsigned char *buffer, size_t *i)
 {
-    buffer[*i] = 0xfa;
+    buffer[*i] = END_OF_SESSION_TOKEN;
     *i += 1;
 }
 
 void method_status_list(unsigned char *buffer, size_t *i)
 {
-    buffer[*i] = 0xf0;
+    buffer[*i] = START_LIST_TOKEN;
     *i += 1;
-
-    *i += 3;
-
-    buffer[*i] = 0xf1;
+    for (int x = 0; x < 3; ++x) {
+        buffer[*i] = 0x00;
+        *i += 1;
+    }
+    buffer[*i] = END_LIST_TOKEN;
     *i += 1;
 }
 
@@ -570,106 +570,53 @@ void medium_atom(unsigned char *buffer, size_t *i, unsigned char S, unsigned cha
     *i += V_len;
 }
 
-uint64_t parse_int(unsigned char *buffer, size_t *i)
+uint64_t parse_int(const unsigned char *buffer, size_t *i)
 {
-    printf("starting with %02x\n", buffer[*i]);
     uint64_t result = 0;
     if ((buffer[*i] & (0b1 << 7)) == (0b0 << 7)) {
+        // TODO
         result = buffer[*i] & 0b00111111;
         *i += 1;
-        
+
         result = -1;
     } else if ((buffer[*i] & (0b11 << 6)) == (0b10 << 6)) {
         size_t len = buffer[*i] & (0b00011111);
-        printf("len: %i\n", len);
         *i += 1;
-        
+
         for (int j = 0; j < len; ++j) {
             result |= buffer[*i] << (((len - 1) - j) * 8);
-            printf("adding: %02x << %i\n", buffer[*i], ((len - 1) - j));
             *i += 1;
         }
     }
     return result;
 }
 
-
-int get(unsigned char *buffer, size_t *i, unsigned char *invoking_id, size_t invoking_id_len)
+void table_get(unsigned char *buffer, size_t *i, unsigned char *invoking_uid, unsigned char start, unsigned char end)
 {
-    /*
-        TableUID.Get [
-        ObjectUID.Get [
-        Cellblock : cell_block ]
-        =>
-        [ Result : typeOr { Bytes : bytes, RowValues : list [ ColumnNumber = Value ... ] } ]
-    */
-
-    // Data Payload
-    call_token(buffer, i);
-    // Invoking UID
-    short_atom(buffer, i, 1, invoking_id, invoking_id_len);
-    // Method UID (Table 241) - Get
-    short_atom(buffer, i, 1, "\x00\x00\x00\x06\x00\x00\x00\x16", 8);
-    // [
-    start_list(buffer, i);
-    {
-        start_list(buffer, i);
-        {
-            // startColumn
-            if (1) {
-                start_name_list(buffer, i);
-                {
-                    tiny_atom(buffer, i, 0, 3);
-                    tiny_atom(buffer, i, 0, 3);
-                }
-                end_name_list(buffer, i);
-            }
-            // endColumn
-            if (1) {
-                start_name_list(buffer, i);
-                {
-                    tiny_atom(buffer, i, 0, 4);
-                    tiny_atom(buffer, i, 0, 3);
-                }
-                end_name_list(buffer, i);
-            }
-        }
-        end_list(buffer, i);
-    }
-    // ]
-    end_list(buffer, i);
-    end_of_data(buffer, i);
-    method_status_list(buffer, i);
-}
-
-int locking_range_get(unsigned char *buffer, size_t *i, unsigned char locking_range_uid) {
     // Core: Table 226 Locking Table Description
     // Data Payload
     call_token(buffer, i);
-    // https://trustedcomputinggroup.org/wp-content/uploads/TCG-Storage-Opal-SSC-v2p02-r1p0_pub24jan2022.pdf: Table 39 Locking SP
-    // Locking_RangeNNNN UID
-    char locking_range_uid_str[9] = "\x00\x00\x08\x02\x00\x03\x00\x00";
-    locking_range_uid_str[7] = locking_range_uid;
-    short_atom(buffer, i, 1, locking_range_uid_str, 8);
-    // Get Method UID
+    // https://trustedcomputinggroup.org/wp-content/uploads/TCG-Storage-Opal-SSC-v2p02-r1p0_pub24jan2022.pdf
+    // Table 39 Locking SP
+    short_atom(buffer, i, 1, invoking_uid, 8);
     short_atom(buffer, i, 1, METHOD_UID_GET, 8);
     // [
     start_list(buffer, i);
     {
         start_list(buffer, i);
         {
-            start_name_list(buffer, i);
+            start_name(buffer, i);
             {
-                // startColumn = active key
+                // startColumn
                 tiny_atom(buffer, i, 0, 3);
-                tiny_atom(buffer, i, 0, 0xa);
+                tiny_atom(buffer, i, 0, start);
             }
             end_name_list(buffer, i);
-            start_name_list(buffer, i);
+            start_name(buffer, i);
             {
-                // endColumn = active key
+                // endColumn
                 tiny_atom(buffer, i, 0, 4);
-                tiny_atom(buffer, i, 0, 0xa);
+                tiny_atom(buffer, i, 0, end);
             }
             end_name_list(buffer, i);
         }
@@ -681,30 +628,37 @@ int locking_range_get(unsigned char *buffer, size_t *i, unsigned char locking_ra
     method_status_list(buffer, i);
 }
 
-int locking_range_set(unsigned char *buffer, size_t *i, unsigned char locking_range_uid, uint16_t range_start, uint16_t range_length, char read_lock_enabled, char write_lock_enabled, char read_locked, char write_locked)
+int locking_range_get(unsigned char *buffer, size_t *i, unsigned char locking_range_uid, unsigned char start,
+                      unsigned char end)
+{
+    char locking_range_uid_str[] = LOCKING_RANGE_NNNN_UID;
+    locking_range_uid_str[7] = locking_range_uid;
+    table_get(buffer, i, locking_range_uid_str, start, end);
+}
+
+int locking_range_set(unsigned char *buffer, size_t *i, unsigned char locking_range_uid, uint16_t range_start,
+                      uint16_t range_length, char read_lock_enabled, char write_lock_enabled, char read_locked,
+                      char write_locked)
 {
     // Core: Table 226 Locking Table Description
     // Data Payload
     call_token(buffer, i);
-    // https://trustedcomputinggroup.org/wp-content/uploads/TCG-Storage-Opal-SSC-v2p02-r1p0_pub24jan2022.pdf: Table 39 Locking SP
-    // Locking_RangeNNNN UID
-    char locking_range_uid_str[9] = "\x00\x00\x08\x02\x00\x03\x00\x00";
+    char locking_range_uid_str[9] = LOCKING_RANGE_NNNN_UID;
     locking_range_uid_str[7] = locking_range_uid;
     short_atom(buffer, i, 1, locking_range_uid_str, 8);
-    // Set Method UID
     short_atom(buffer, i, 1, METHOD_UID_SET, 8);
     // [
     start_list(buffer, i);
     {
         // "Values" = [...]
-        start_name_list(buffer, i);
+        start_name(buffer, i);
         {
             tiny_atom(buffer, i, 0, 1);
             // [
             start_list(buffer, i);
             {
                 if (range_start != UINT16_MAX) {
-                    start_name_list(buffer, i);
+                    start_name(buffer, i);
                     {
                         printf("range_start = %i (actually 0)\n", range_start);
                         tiny_atom(buffer, i, 0, 3);
@@ -713,7 +667,7 @@ int locking_range_set(unsigned char *buffer, size_t *i, unsigned char locking_ra
                     end_name_list(buffer, i);
                 }
                 if (range_length != UINT16_MAX) {
-                    start_name_list(buffer, i);
+                    start_name(buffer, i);
                     {
                         printf("range_length = %i (actually 512)\n", range_length);
                         tiny_atom(buffer, i, 0, 4);
@@ -722,7 +676,7 @@ int locking_range_set(unsigned char *buffer, size_t *i, unsigned char locking_ra
                     end_name_list(buffer, i);
                 }
                 if (read_lock_enabled != -1) {
-                    start_name_list(buffer, i);
+                    start_name(buffer, i);
                     {
                         printf("read_lock_enabled = %i\n", read_lock_enabled);
                         tiny_atom(buffer, i, 0, 5);
@@ -731,7 +685,7 @@ int locking_range_set(unsigned char *buffer, size_t *i, unsigned char locking_ra
                     end_name_list(buffer, i);
                 }
                 if (write_lock_enabled != -1) {
-                    start_name_list(buffer, i);
+                    start_name(buffer, i);
                     {
                         printf("write_lock_enabled = %i\n", write_lock_enabled);
                         tiny_atom(buffer, i, 0, 6);
@@ -740,7 +694,7 @@ int locking_range_set(unsigned char *buffer, size_t *i, unsigned char locking_ra
                     end_name_list(buffer, i);
                 }
                 if (read_locked != -1) {
-                    start_name_list(buffer, i);
+                    start_name(buffer, i);
                     {
                         printf("read_locked = %i\n", read_locked);
                         tiny_atom(buffer, i, 0, 7);
@@ -749,7 +703,7 @@ int locking_range_set(unsigned char *buffer, size_t *i, unsigned char locking_ra
                     end_name_list(buffer, i);
                 }
                 if (write_locked != -1) {
-                    start_name_list(buffer, i);
+                    start_name(buffer, i);
                     {
                         printf("write_locked = %i\n", write_locked);
                         tiny_atom(buffer, i, 0, 8);
@@ -769,8 +723,7 @@ int locking_range_set(unsigned char *buffer, size_t *i, unsigned char locking_ra
     method_status_list(buffer, i);
 }
 
-
-int user_pin_set(unsigned char *buffer, size_t *i, unsigned char user_uid)
+int user_pin_set(unsigned char *buffer, size_t *i, unsigned char user_uid, char *user_pin, int user_pin_len)
 {
     call_token(buffer, i);
     char user_uid_str[9] = "\x00\x00\x00\x0b\x00\x03\x00\x00";
@@ -782,17 +735,17 @@ int user_pin_set(unsigned char *buffer, size_t *i, unsigned char user_uid)
     start_list(buffer, i);
     {
         // "Values" = [...]
-        start_name_list(buffer, i);
+        start_name(buffer, i);
         {
             tiny_atom(buffer, i, 0, 1);
             // [
             start_list(buffer, i);
             {
-                start_name_list(buffer, i);
+                start_name(buffer, i);
                 {
                     printf("pin = 0x777777...\n");
                     tiny_atom(buffer, i, 0, 3);
-                    medium_atom(buffer, i, 1, "\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77", 16);
+                    medium_atom(buffer, i, 1, user_pin, user_pin_len);
                 }
                 end_name_list(buffer, i);
             }
@@ -807,7 +760,7 @@ int user_pin_set(unsigned char *buffer, size_t *i, unsigned char user_uid)
     method_status_list(buffer, i);
 }
 
-int user_set(unsigned char *buffer, size_t *i, unsigned char user_uid)
+int user_enabled_set(unsigned char *buffer, size_t *i, unsigned char user_uid)
 {
     call_token(buffer, i);
     char user_uid_str[9] = "\x00\x00\x00\x09\x00\x03\x00\x00"; // Locking SP Authority Table User1 UID
@@ -819,13 +772,13 @@ int user_set(unsigned char *buffer, size_t *i, unsigned char user_uid)
     start_list(buffer, i);
     {
         // "Values" = [...]
-        start_name_list(buffer, i);
+        start_name(buffer, i);
         {
             tiny_atom(buffer, i, 0, 1);
             // [
             start_list(buffer, i);
             {
-                start_name_list(buffer, i);
+                start_name(buffer, i);
                 {
                     printf("enabled = 1\n");
                     tiny_atom(buffer, i, 0, 5);
@@ -844,7 +797,8 @@ int user_set(unsigned char *buffer, size_t *i, unsigned char user_uid)
     method_status_list(buffer, i);
 }
 
-int end_session(unsigned char *buffer, size_t *i) {
+int end_session(unsigned char *buffer, size_t *i)
+{
     end_session_token(buffer, i);
 }
 
@@ -893,7 +847,7 @@ int start_session(unsigned char *buffer, size_t *i, unsigned char *SPID, size_t 
         tiny_atom(buffer, i, 0, 1);
         // HostChallenge = bytes,
         if (host_challenge) {
-            start_name_list(buffer, i);
+            start_name(buffer, i);
             {
                 tiny_atom(buffer, i, 0, 0);
                 medium_atom(buffer, i, 1, host_challenge, host_challenge_len);
@@ -902,7 +856,7 @@ int start_session(unsigned char *buffer, size_t *i, unsigned char *SPID, size_t 
         }
         // HostExchangeAuthority = uidref {AuthorityObjectUID},
         if (host_exchange_authority) {
-            start_name_list(buffer, i);
+            start_name(buffer, i);
             {
                 tiny_atom(buffer, i, 0, 1);
                 medium_atom(buffer, i, 1, host_exchange_authority, host_exchange_authority_len);
@@ -912,7 +866,7 @@ int start_session(unsigned char *buffer, size_t *i, unsigned char *SPID, size_t 
         // HostExchangeCert = bytes,
         // HostSigningAuthority = uidref {AuthorityObjectUID},
         if (host_signing_authority) {
-            start_name_list(buffer, i);
+            start_name(buffer, i);
             {
                 tiny_atom(buffer, i, 0, 3);
                 short_atom(buffer, i, 1, host_signing_authority, host_signing_authority_len);
@@ -969,7 +923,8 @@ struct HeadersStruct {
     struct DataSubPacket data_subpacket;
 };
 
-void prepare_headers(unsigned char *buffer, size_t *i, uint64_t sp_session_id, uint64_t host_session_id) {
+void prepare_headers(unsigned char *buffer, size_t *i, uint64_t sp_session_id, uint64_t host_session_id)
+{
     struct HeadersStruct *headers = (void *)(((unsigned char *)buffer));
 
     headers->com_packet.comid = swap_endian_16(base_comID);
@@ -978,7 +933,8 @@ void prepare_headers(unsigned char *buffer, size_t *i, uint64_t sp_session_id, u
     *i += sizeof(struct HeadersStruct);
 }
 
-void finish_headers(unsigned char *buffer, size_t *i) {
+void finish_headers(unsigned char *buffer, size_t *i)
+{
     struct HeadersStruct *headers = (void *)(((unsigned char *)buffer));
 
     if ((*i % 4) != 0)
@@ -986,7 +942,8 @@ void finish_headers(unsigned char *buffer, size_t *i) {
 
     headers->com_packet.length = swap_endian_32(*i - sizeof(struct ComPacket));
     headers->packet.length = swap_endian_32(swap_endian_32(headers->com_packet.length) - sizeof(struct Packet));
-    headers->data_subpacket.length = swap_endian_32(swap_endian_32(headers->packet.length) - sizeof(struct DataSubPacket));
+    headers->data_subpacket.length =
+            swap_endian_32(swap_endian_32(headers->packet.length) - sizeof(struct DataSubPacket));
 
     if ((*i % 512) != 0)
         *i += PADDING_ALIGNMENT - (*i % PADDING_ALIGNMENT);
@@ -1019,21 +976,19 @@ int init_session(int fd, unsigned char *SPID, unsigned char user_id)
         i = 0;
         prepare_headers(buffer, &i, 0, 0); //  01 f2 00 d0 20
 
-        unsigned char *salted_hashed_etc_challenge = "\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77";
+        unsigned char *salted_hashed_etc_challenge = DEFAULT_HOST_CHALLENGE;
         if (user_id == 0) {
             if (strcmp(dev, "/dev/sda") == 0) {
-                salted_hashed_etc_challenge =
-                        "\xc1\xef\x2a\xaa\xf6\xa6\xac\x7b\xd9\x79\x1c\xdb\x64\xf3\xac\x2a\x4f\x42\x96\xdd\xb4\x4f\x29\x98\x20\x87\xb7\xb3\xd8\xba\xa2\xa9";
+                salted_hashed_etc_challenge = DEFAULT_SDA_HOST_CHALLENGE;
             } else if (strcmp(dev, "/dev/sdb") == 0) {
-                salted_hashed_etc_challenge =
-                        "\xc5\x80\xe7\x40\x14\xad\x88\x2c\xba\x75\xc6\x1c\x63\x70\xa0\x71\x49\xd7\x9b\x3d\x3e\xd3\xee\x53\x40\x92\x15\xdf\x53\xbf\xa6\x7a";
+                salted_hashed_etc_challenge = DEFAULT_SDB_HOST_CHALLENGE;
             }
             start_session(buffer, &i, SPID, 8, salted_hashed_etc_challenge, 32, NULL, 0, ADMIN1_UID, 8);
         } else {
             printf("INITED SESSION AS A USER %i!\n", user_id);
             unsigned char signing_auth[9] = "\x00\x00\x00\x09\x00\x03\x00\x00";
             signing_auth[7] = user_id;
-            start_session(buffer, &i, SPID, 8, "\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77", 16, NULL, 0, signing_auth, 8);
+            start_session(buffer, &i, SPID, 8, DEFAULT_HOST_CHALLENGE, 32, NULL, 0, signing_auth, 8);
         }
         finish_headers(buffer, &i);
 
@@ -1077,7 +1032,8 @@ int init_session(int fd, unsigned char *SPID, unsigned char user_id)
     return 0;
 }
 
-void finish_session(int fd) {
+void finish_session(int fd)
+{
     size_t i = 0;
     struct ComPacket *com_packet;
     struct Packet *packet;
@@ -1104,22 +1060,18 @@ void finish_session(int fd) {
     }
 }
 
-
-void user_unlock_range(int fd, unsigned char locking_range_uid, char read_lock_enabled, char write_lock_enabled,
-                  char read_locked, char write_locked)
+void unlock_range(int fd, unsigned char locking_range_uid, unsigned char user_uid, char read_lock_enabled,
+                  char write_lock_enabled, char read_locked, char write_locked)
 {
-    size_t i = 0;
-    struct ComPacket *com_packet;
-    struct Packet *packet;
-    struct DataSubPacket *data_subpacket;
     int rc = 0;
 
     printf("Unlock range:\n");
     unsigned char buffer[4096] = { 0 };
     unsigned char response[4096] = { 0 };
+    size_t i = 0;
 
     if (rc == 0) {
-        init_session(fd, LOCKING_SP_UID, 1);
+        init_session(fd, LOCKING_SP_UID, user_uid);
     }
 
     if (rc == 0) {
@@ -1127,62 +1079,14 @@ void user_unlock_range(int fd, unsigned char locking_range_uid, char read_lock_e
         memset(buffer, 0, sizeof(buffer));
         i = 0;
         prepare_headers(buffer, &i, SPSessionID, HostSessionID);
-        locking_range_set(buffer, &i, 1, -1, -1, read_lock_enabled, write_lock_enabled, read_locked, write_locked);
+        locking_range_set(buffer, &i, locking_range_uid, -1, -1, read_lock_enabled, write_lock_enabled, read_locked,
+                          write_locked);
         finish_headers(buffer, &i);
-
         ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
 
         printf("Getting Set LockingRange1 Result:\n");
         memset(response, 0, sizeof(response));
         ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
-
-        // -> []
-        i = 0;
-        i += sizeof(struct HeadersStruct);
-        i += 1; // start list token
-        i += 1; // end list token
-        i += 1; // end of data token
-        // method status list
-        printf("method status code: %s (%i)\n", MSC_to_string(response[i + 1]), response[i + 1]);
-        printf("\n");
-    }
-
-    if (rc == 0) {
-        finish_session(fd);
-    }
-}
-
-void unlock_range(int fd, unsigned char locking_range_uid, char read_lock_enabled, char write_lock_enabled,
-                  char read_locked, char write_locked)
-{
-    size_t i = 0;
-    struct ComPacket *com_packet;
-    struct Packet *packet;
-    struct DataSubPacket *data_subpacket;
-    int rc = 0;
-
-    printf("Unlock range:\n");
-    unsigned char buffer[4096] = { 0 };
-    unsigned char response[4096] = { 0 };
-
-    if (rc == 0) {
-        init_session(fd, LOCKING_SP_UID, 0);
-    }
-
-    if (rc == 0) {
-        printf("Sending Set LockingRange1:\n");
-        memset(buffer, 0, sizeof(buffer));
-        i = 0;
-        prepare_headers(buffer, &i, SPSessionID, HostSessionID);
-        locking_range_set(buffer, &i, 1, -1, -1, read_lock_enabled, write_lock_enabled, read_locked, write_locked);
-        finish_headers(buffer, &i);
-
-        ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
-
-        printf("Getting Set LockingRange1 Result:\n");
-        memset(response, 0, sizeof(response));
-        ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
-
         // -> []
         i = 0;
         i += sizeof(struct HeadersStruct);
@@ -1202,9 +1106,6 @@ void unlock_range(int fd, unsigned char locking_range_uid, char read_lock_enable
 void setup_range(int fd, unsigned char locking_range_uid)
 {
     size_t i = 0;
-    struct ComPacket *com_packet;
-    struct Packet *packet;
-    struct DataSubPacket *data_subpacket;
     int rc = 0;
 
     printf("Unlock range:\n");
@@ -1248,7 +1149,7 @@ void setup_range(int fd, unsigned char locking_range_uid)
         memset(buffer, 0, sizeof(buffer));
         i = 0;
         prepare_headers(buffer, &i, SPSessionID, HostSessionID);
-        locking_range_get(buffer, &i, 1);
+        locking_range_get(buffer, &i, locking_range_uid, LOCKING_TABLE_ACTIVE_KEY, LOCKING_TABLE_ACTIVE_KEY);
         finish_headers(buffer, &i);
         ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
 
@@ -1321,30 +1222,30 @@ void setup_range(int fd, unsigned char locking_range_uid)
             start_list(buffer, i);
             {
                 // "Values" = [...]
-                start_name_list(buffer, i);
+                start_name(buffer, i);
                 {
                     tiny_atom(buffer, i, 0, 1);
                     // [
                     start_list(buffer, i);
                     {
-                        start_name_list(buffer, i);
+                        start_name(buffer, i);
                         {
                             tiny_atom(buffer, i, 0, 3); // BooleanExpr
-                            start_list(buffer, i); 
+                            start_list(buffer, i);
                             {
-                                start_name_list(buffer, i);
+                                start_name(buffer, i);
                                 {
                                     short_atom(buffer, i, 1, "\x00\x00\x0c\x05", 4); // Authority_object_ref
                                     short_atom(buffer, i, 1, "\x00\x00\x00\x09\x00\x03\x00\x01", 8); // user 1 uid
                                 }
                                 end_name_list(buffer, i);
-                                start_name_list(buffer, i);
+                                start_name(buffer, i);
                                 {
                                     short_atom(buffer, i, 1, "\x00\x00\x0c\x05", 4); // Authority_object_ref
                                     short_atom(buffer, i, 1, "\x00\x00\x00\x09\x00\x03\x00\x02", 8); // user 2 uid
                                 }
                                 end_name_list(buffer, i);
-                                start_name_list(buffer, i);
+                                start_name(buffer, i);
                                 {
                                     short_atom(buffer, i, 1, "\x00\x00\x04\x0e", 4); // bolean_ace
                                     tiny_atom(buffer, i, 0, 0x01); // or
@@ -1368,17 +1269,19 @@ void setup_range(int fd, unsigned char locking_range_uid)
         finish_headers(buffer, &i);
         ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
 
-                for (int x= 0; x < 254 ;++x ) {
-                    printf("%02x ", buffer[x]);
-                }printf("\n");
+        for (int x = 0; x < 254; ++x) {
+            printf("%02x ", buffer[x]);
+        }
+        printf("\n");
 
         printf("Getting ...:\n");
         memset(response, 0, sizeof(response));
         ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
 
-        for (int x= 0; x < 254 ;++x ) {
+        for (int x = 0; x < 254; ++x) {
             printf("%02x ", response[x]);
-        }printf("\n");
+        }
+        printf("\n");
     }
 
     if (rc == 0) {
@@ -1394,12 +1297,9 @@ void setup_range(int fd, unsigned char locking_range_uid)
     }
 }
 
-void setup_user(int fd) {
-    
+void setup_user(int fd, int user_uid, char *user_pin, int user_pin_len)
+{
     size_t i = 0;
-    struct ComPacket *com_packet;
-    struct Packet *packet;
-    struct DataSubPacket *data_subpacket;
     int rc = 0;
 
     printf("Unlock range:\n");
@@ -1416,7 +1316,7 @@ void setup_user(int fd) {
         memset(buffer, 0, sizeof(buffer));
         i = 0;
         prepare_headers(buffer, &i, SPSessionID, HostSessionID);
-        user_set(buffer, &i, 1);
+        user_enabled_set(buffer, &i, user_uid);
         finish_headers(buffer, &i);
         ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
 
@@ -1431,7 +1331,7 @@ void setup_user(int fd) {
         memset(buffer, 0, sizeof(buffer));
         i = 0;
         prepare_headers(buffer, &i, SPSessionID, HostSessionID);
-        user_pin_set(buffer, &i, 1);
+        user_pin_set(buffer, &i, user_uid, user_pin, user_pin_len);
         finish_headers(buffer, &i);
         for (int x = 0; x < 256; x++) {
             printf("%02x ", buffer[x]);
@@ -1453,6 +1353,8 @@ void setup_user(int fd) {
     }
 }
 
+
+
 int main(int argc, char **argv)
 {
     int err = 0;
@@ -1463,28 +1365,29 @@ int main(int argc, char **argv)
         dev = argv[2];
     }
 
-    if (strcmp(argv[1], "identify") == 0) {
+    if (strcmp(argv[1], "nvme_identify") == 0) {
         return nvme_identify(fd);
     } else if (strcmp(argv[1], "discovery") == 0) {
         ata_discovery(fd);
-    } else if (strcmp(argv[1], "todo") == 0) {
-        // return todo_take_ownership();
-    } else if (strcmp(argv[1], "unlock") == 0) {
+    } else if (strcmp(argv[1], "admin_unlock") == 0) {
         char args[4] = { 0 };
         for (int i = 0; i < 4; ++i) {
             args[i] = argv[3][i] == '0' ? 0 : argv[3][i] == '1' ? 1 : -1;
         }
-        unlock_range(fd, 1, args[0], args[1], args[2], args[3]);
-    }else if (strcmp(argv[1], "user_unlock") == 0) {
+        unlock_range(fd, 1, 0, args[0], args[1], args[2], args[3]);
+    } else if (strcmp(argv[1], "user_unlock") == 0) {
         char args[4] = { 0 };
         for (int i = 0; i < 4; ++i) {
             args[i] = argv[3][i] == '0' ? 0 : argv[3][i] == '1' ? 1 : -1;
         }
-        user_unlock_range(fd, 1, args[0], args[1], args[2], args[3]);
-    } else if (strcmp(argv[1], "setup") == 0) {
+        unlock_range(fd, 1, 1, args[0], args[1], args[2], args[3]);
+    } else if (strcmp(argv[1], "setup_range") == 0) {
         setup_range(fd, 1);
-    } else if (strcmp(argv[1], "user") == 0) {
-        setup_user(fd);
+    } else if (strcmp(argv[1], "setup_user") == 0) {
+        setup_user(
+                fd, 1,
+                "\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77",
+                32);
     } else {
         printf("invalid command\n");
 
