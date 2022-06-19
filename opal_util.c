@@ -1,40 +1,19 @@
 #include <linux/nvme_ioctl.h>
 #include <linux/fscrypt.h>
-#include <linux/hdreg.h>
-#include <sys/random.h>
 #include <sys/ioctl.h>
-#include <arpa/inet.h>
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <scsi/sg.h>
 #include <unistd.h>
 #include <string.h>
-#include <assert.h>
 #include <stdlib.h>
-#include <malloc.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <time.h>
-
 #include <argp.h>
-#include <stdbool.h>
-#include <string.h>
-#include <stdlib.h>
-#include <stdint.h>
 
 uint16_t base_comID = 0;
-
-#define DEFAULT_HOST_CHALLENGE                                                                                         \
-    (unsigned char                                                                                                     \
-             *)"\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77\x77"
-#define DEFAULT_SDA_HOST_CHALLENGE                                                                                     \
-    (unsigned char                                                                                                     \
-             *)"\xc1\xef\x2a\xaa\xf6\xa6\xac\x7b\xd9\x79\x1c\xdb\x64\xf3\xac\x2a\x4f\x42\x96\xdd\xb4\x4f\x29\x98\x20\x87\xb7\xb3\xd8\xba\xa2\xa9"
-#define DEFAULT_SDB_HOST_CHALLENGE                                                                                     \
-    (unsigned char                                                                                                     \
-             *)"\xc5\x80\xe7\x40\x14\xad\x88\x2c\xba\x75\xc6\x1c\x63\x70\xa0\x71\x49\xd7\x9b\x3d\x3e\xd3\xee\x53\x40\x92\x15\xdf\x53\xbf\xa6\x7a"
 
 /* msleep(): Sleep for the requested number of milliseconds. */
 int msleep(long msec)
@@ -55,6 +34,23 @@ int msleep(long msec)
     } while (res && errno == EINTR);
 
     return res;
+}
+
+int hex_add(unsigned char *a, size_t a_len, size_t b)
+{
+    size_t i = 0;
+    int extra = 0;
+    while ((b > 0 || extra > 0) && i < a_len) {
+        int next_extra = (a[a_len - i - 1] + (b % 256) + extra) > 255;
+
+        a[a_len - i - 1] += (b % 256) + extra;
+
+        b /= 256;
+        i += 1;
+        extra = next_extra;
+    }
+
+    return b > 0;
 }
 
 #define ATA_TRUSTED_RECEIVE 0x5c
@@ -321,8 +317,8 @@ void tcg_discovery_0_process_feature(void *data, int feature_code)
         struct Level0DiscoveryGeometryFeature *feature = data;
         printf("Geometry feature:\n"
                " - logical block size: %i\n"
-               " - alignment granularity: %i\n"
-               " - lowest alignment LBA: %i\n",
+               " - alignment granularity: %li\n"
+               " - lowest alignment LBA: %li\n",
                swap_endian_32(feature->logical_block_size), swap_endian_64(feature->alignment_granularity),
                swap_endian_64(feature->lowest_alignment_LBA));
     } else if (feature_code == 0x0203) {
@@ -350,7 +346,7 @@ void tcg_discovery_0_process_response(void *data)
 
     while (offset < total_length) {
         struct Level0DiscoverySharedFeature *body = data + offset;
-        uint32_t feature_code = swap_endian_16(body->feature_code);
+        uint16_t feature_code = swap_endian_16(body->feature_code);
 
         tcg_discovery_0_process_feature(body, feature_code);
 
@@ -637,7 +633,7 @@ void table_get(unsigned char *buffer, size_t *i, unsigned char *invoking_uid, un
 int locking_range_get(unsigned char *buffer, size_t *i, unsigned char locking_range_uid, unsigned char start,
                       unsigned char end)
 {
-    char locking_range_uid_str[] = LOCKING_RANGE_NNNN_UID;
+    unsigned char locking_range_uid_str[] = LOCKING_RANGE_NNNN_UID;
     locking_range_uid_str[7] = locking_range_uid;
     table_get(buffer, i, locking_range_uid_str, start, end);
 }
@@ -649,7 +645,7 @@ int locking_range_set(unsigned char *buffer, size_t *i, unsigned char locking_ra
     // Core: Table 226 Locking Table Description
     // Data Payload
     call_token(buffer, i);
-    char locking_range_uid_str[9] = LOCKING_RANGE_NNNN_UID;
+    unsigned char locking_range_uid_str[9] = LOCKING_RANGE_NNNN_UID;
     locking_range_uid_str[7] = locking_range_uid;
     short_atom(buffer, i, 1, locking_range_uid_str, 8);
     short_atom(buffer, i, 1, METHOD_UID_SET, 8);
@@ -668,7 +664,9 @@ int locking_range_set(unsigned char *buffer, size_t *i, unsigned char locking_ra
                     {
                         printf("range_start = %i (actually 0)\n", range_start);
                         tiny_atom(buffer, i, 0, 3);
-                        short_atom(buffer, i, 0, "\x00\x00", 2);
+                        unsigned char tmp[] = "\x00\x00";
+                        hex_add(tmp, 2, range_start);
+                        short_atom(buffer, i, 0, tmp, 2);
                     }
                     end_name_list(buffer, i);
                 }
@@ -677,7 +675,9 @@ int locking_range_set(unsigned char *buffer, size_t *i, unsigned char locking_ra
                     {
                         printf("range_length = %i (actually 512)\n", range_length);
                         tiny_atom(buffer, i, 0, 4);
-                        short_atom(buffer, i, 0, "\x02\x00", 2);
+                        unsigned char tmp[] = "\x00\x00";
+                        hex_add(tmp, 2, range_length);
+                        short_atom(buffer, i, 0, tmp, 2);
                     }
                     end_name_list(buffer, i);
                 }
@@ -729,11 +729,11 @@ int locking_range_set(unsigned char *buffer, size_t *i, unsigned char locking_ra
     method_status_list(buffer, i);
 }
 
-int user_pin_set(unsigned char *buffer, size_t *i, unsigned char user_uid, char *user_pin, int user_pin_len)
+int user_pin_set(unsigned char *buffer, size_t *i, unsigned char user_uid, unsigned char *user_pin, int user_pin_len)
 {
     call_token(buffer, i);
-    char user_uid_str[9] = "\x00\x00\x00\x0b\x00\x03\x00\x00";
-    user_uid_str[7] = user_uid;
+    unsigned char user_uid_str[9] = "\x00\x00\x00\x0b\x00\x03\x00\x00";
+    hex_add(user_uid_str, 8, user_uid);
     short_atom(buffer, i, 1, user_uid_str, 8);
     // Set Method UID
     short_atom(buffer, i, 1, METHOD_UID_SET, 8);
@@ -1025,7 +1025,7 @@ int init_session(int fd, unsigned char *SPID, unsigned char user_id, unsigned ch
         i += 1; // start list token
         HostSessionID = swap_endian_32(parse_int(response, &i));
         SPSessionID = swap_endian_32(parse_int(response, &i));
-        printf("HostSessionID: %x,  SPSessionID: %x \n", HostSessionID, SPSessionID);
+        printf("HostSessionID: %lx,  SPSessionID: %lx \n", HostSessionID, SPSessionID);
         i += 1; // end list token
         i += 1; // end of data token
         // method status list
@@ -1106,7 +1106,7 @@ void unlock_range(int fd, unsigned char locking_range_uid, unsigned char user_ui
     }
 }
 
-void setup_range(int fd, unsigned char locking_range_uid, unsigned char *challenge, size_t challenge_len)
+void setup_range(int fd, unsigned char locking_range_uid, unsigned char *challenge, size_t challenge_len, uint16_t start, uint16_t length)
 {
     size_t i = 0;
     int rc = 0;
@@ -1126,7 +1126,7 @@ void setup_range(int fd, unsigned char locking_range_uid, unsigned char *challen
         memset(buffer, 0, sizeof(buffer));
         i = 0;
         prepare_headers(buffer, &i, SPSessionID, HostSessionID);
-        locking_range_set(buffer, &i, 1, 0, 512, 1, 1, -1, -1);
+        locking_range_set(buffer, &i, 1, start, length, 1, 1, -1, -1);
         finish_headers(buffer, &i);
 
         ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
@@ -1300,7 +1300,8 @@ void setup_range(int fd, unsigned char locking_range_uid, unsigned char *challen
     }
 }
 
-void setup_user(int fd, int user_uid, char *admin_pin, int admin_pin_len, char *user_pin, int user_pin_len)
+void setup_user(int fd, int user_uid, unsigned char *admin_pin, int admin_pin_len, unsigned char *user_pin,
+                int user_pin_len)
 {
     size_t i = 0;
     int rc = 0;
@@ -1361,7 +1362,9 @@ void setup_user(int fd, int user_uid, char *admin_pin, int admin_pin_len, char *
 static struct argp_option options[] = { { "verify-pin", 'v', "verify_pin" },
                                         { "assign-pin", 'a', "assign_pin" },
                                         { "user", 'u', "user" },
-                                        { "locking-range", 'l', "locking_range" },
+                                        { "locking-range", 'L', "locking_range" },
+                                        { "locking-range-start", 's', "start" },
+                                        { "locking-range-length", 'l', "length" },
                                         { "read-lock-enabled", 'R', "state" },
                                         { "write-lock-enabled", 'W', "state" },
                                         { "read-locked", 'r', "state" },
@@ -1377,6 +1380,8 @@ struct Arguments {
     size_t verify_pin_len;
     unsigned char assign_pin[512];
     size_t assign_pin_len;
+    uint16_t locking_range_start;
+    uint16_t locking_range_length;
     int8_t read_lock_enabled;
     int8_t write_lock_enabled;
     int8_t read_locked;
@@ -1444,8 +1449,14 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state)
     case 'u':
         args->user = strtol(arg, NULL, 10);
         break;
-    case 'l':
+    case 'L':
         args->locking_range = strtol(arg, NULL, 10);
+        break;
+    case 's':
+        args->locking_range_start = strtol(arg, NULL, 10);
+        break;
+    case 'l':
+        args->locking_range_length = strtol(arg, NULL, 10);
         break;
     case 'v':
         return parse_hex(arg, args->verify_pin, &args->verify_pin_len);
@@ -1512,7 +1523,7 @@ int main(int argc, char *argv[])
                      arguments.write_lock_enabled, arguments.read_locked, arguments.write_locked, arguments.verify_pin,
                      arguments.verify_pin_len);
     } else if (arguments.command == CMD_SETUP_RANGE) {
-        setup_range(fd, arguments.locking_range, arguments.verify_pin, arguments.verify_pin_len);
+        setup_range(fd, arguments.locking_range, arguments.verify_pin, arguments.verify_pin_len, arguments.locking_range_start, arguments.locking_range_length);
     } else if (arguments.command == CMD_SETUP_USER) {
         setup_user(fd, arguments.user, arguments.verify_pin, arguments.verify_pin_len, arguments.assign_pin,
                    arguments.assign_pin_len);
