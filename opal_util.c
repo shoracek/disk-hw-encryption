@@ -289,56 +289,61 @@ int nvme_identify(int fd)
     return err;
 }
 
-void tcg_discovery_0_process_feature(void *data, int feature_code)
+void tcg_discovery_0_process_feature(void *data, int feature_code, int print)
 {
     if (feature_code == 0x0001) {
         struct Level0DiscoveryTPerFeature *body = data;
-        printf("TPer feature:\n"
-               " - comID mgmt supported %i\n"
-               " - streaming supported %i\n"
-               " - buffer mgmt supported %i\n"
-               " - ack nack supported %i\n"
-               " - async supported %i\n"
-               " - sync supported %i\n",
-               body->comID_mgmt_supported, body->streaming_supported, body->buffer_mgmt_supported,
-               body->ack_nack_supported, body->async_supported, body->sync_supported);
+        if (print)
+            printf("TPer feature:\n"
+                   " - comID mgmt supported %i\n"
+                   " - streaming supported %i\n"
+                   " - buffer mgmt supported %i\n"
+                   " - ack nack supported %i\n"
+                   " - async supported %i\n"
+                   " - sync supported %i\n",
+                   body->comID_mgmt_supported, body->streaming_supported, body->buffer_mgmt_supported,
+                   body->ack_nack_supported, body->async_supported, body->sync_supported);
     } else if (feature_code == 0x0002) {
         struct Level0DiscoveryLockingFeature *feature = data;
-        printf("Locking feature:\n"
-               " - locking supported: %i\n"
-               " - locking enabled %i\n"
-               " - locked %i\n"
-               " - media encryption: %i\n"
-               " - MBR enabled %i\n"
-               " - MBR done %i\n",
-               feature->locking_supported, feature->locking_enabled, feature->locked, feature->media_encryption,
-               feature->MBR_enabled, feature->MBR_done);
+        if (print)
+            printf("Locking feature:\n"
+                   " - locking supported: %i\n"
+                   " - locking enabled %i\n"
+                   " - locked %i\n"
+                   " - media encryption: %i\n"
+                   " - MBR enabled %i\n"
+                   " - MBR done %i\n",
+                   feature->locking_supported, feature->locking_enabled, feature->locked, feature->media_encryption,
+                   feature->MBR_enabled, feature->MBR_done);
     } else if (feature_code == 0x0003) {
         struct Level0DiscoveryGeometryFeature *feature = data;
-        printf("Geometry feature:\n"
-               " - logical block size: %i\n"
-               " - alignment granularity: %li\n"
-               " - lowest alignment LBA: %li\n",
-               swap_endian_32(feature->logical_block_size), swap_endian_64(feature->alignment_granularity),
-               swap_endian_64(feature->lowest_alignment_LBA));
+        if (print)
+            printf("Geometry feature:\n"
+                   " - logical block size: %i\n"
+                   " - alignment granularity: %li\n"
+                   " - lowest alignment LBA: %li\n",
+                   swap_endian_32(feature->logical_block_size), swap_endian_64(feature->alignment_granularity),
+                   swap_endian_64(feature->lowest_alignment_LBA));
     } else if (feature_code == 0x0203) {
         struct Level0DiscoveryOpal2Feature *body = data;
-        printf("Opal SSC V2.00 Feature:\n"
-               " - base comID %i\n"
-               " - number of comIDs %i\n"
-               " - number of locking SP admin authorities %i\n"
-               " - number of locking SP user authorities %i\n",
-               swap_endian_16(body->base_comID), swap_endian_16(body->number_of_comIDs),
-               swap_endian_16(body->number_of_locking_admin_authorities_supported),
-               swap_endian_16(body->number_of_locking_user_authorities_supported));
+        if (print)
+            printf("Opal SSC V2.00 Feature:\n"
+                   " - base comID %i\n"
+                   " - number of comIDs %i\n"
+                   " - number of locking SP admin authorities %i\n"
+                   " - number of locking SP user authorities %i\n",
+                   swap_endian_16(body->base_comID), swap_endian_16(body->number_of_comIDs),
+                   swap_endian_16(body->number_of_locking_admin_authorities_supported),
+                   swap_endian_16(body->number_of_locking_user_authorities_supported));
 
         base_comID = swap_endian_16(body->base_comID);
     } else {
-        printf("unimplemented feature %i\n", feature_code);
+        if (print)
+            printf("unimplemented feature %i\n", feature_code);
     }
 }
 
-void tcg_discovery_0_process_response(void *data)
+void tcg_discovery_0_process_response(void *data, int print)
 {
     struct Level0DiscoveryHeader *header = data;
     uint32_t offset = sizeof(struct Level0DiscoveryHeader);
@@ -348,7 +353,7 @@ void tcg_discovery_0_process_response(void *data)
         struct Level0DiscoverySharedFeature *body = data + offset;
         uint16_t feature_code = swap_endian_16(body->feature_code);
 
-        tcg_discovery_0_process_feature(body, feature_code);
+        tcg_discovery_0_process_feature(body, feature_code, print);
 
         offset += body->length + sizeof(struct Level0DiscoverySharedFeature);
     }
@@ -437,6 +442,12 @@ int ata_trusted(int fd, uint8_t *response, size_t response_len, int cmd, int pro
     if (ioctl(fd, SG_IO, &sg) < 0) {
         printf("bad ioctl %s\n", strerror(errno));
     }
+
+    printf("%s:\n", cmd == ATA_TRUSTED_RECEIVE ? "received" : "sent");
+    for (int x = 0; x < 254; ++x) {
+        printf("%02x ", response[x]);
+    }
+    printf("\n");
 
     if (sense[0] != 0 || sense[1] != 0) {
         printf("got some sense:\n");
@@ -749,10 +760,6 @@ int user_pin_set(unsigned char *buffer, size_t *i, unsigned char user_uid, unsig
             {
                 start_name(buffer, i);
                 {
-                    printf("new pin (%i):\n", user_pin_len);
-                    for (int x = 0; x < user_pin_len; ++x)
-                        printf("%02x ", user_pin[x]);
-                    printf("\n");
                     tiny_atom(buffer, i, 0, 3);
                     medium_atom(buffer, i, 1, user_pin, user_pin_len);
                 }
@@ -918,12 +925,12 @@ struct DataSubPacket {
     uint32_t length;
 };
 
-void ata_discovery(int fd)
+void ata_discovery(int fd, int print)
 {
     uint8_t response[4096] = { 0 };
     ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, TCG_LEVEL_0_DISCOVERY_PROTOCOL_ID,
                 TCG_LEVEL_0_DISCOVERY_COMID);
-    tcg_discovery_0_process_response(response);
+    tcg_discovery_0_process_response(response, print);
 }
 
 struct HeadersStruct {
@@ -970,17 +977,16 @@ int init_session(int fd, unsigned char *SPID, unsigned char user_id, unsigned ch
     struct Packet *packet;
     struct DataSubPacket *data_subpacket;
 
-    printf("Unlock range:\n");
     unsigned char buffer[4096] = { 0 };
     unsigned char response[4096] = { 0 };
 
     printf("Discovery 0:\n");
-    ata_discovery(fd);
+    ata_discovery(fd, 0);
     printf("    base ComID = %x\n", base_comID);
 
     // StartSession
     {
-        printf("Sending StartSession:\n");
+        printf("Sending StartSession (user_id=%i):\n", user_id);
         memset(buffer, 0, sizeof(buffer));
         i = 0;
         prepare_headers(buffer, &i, 0, 0); //  01 f2 00 d0 20
@@ -1001,10 +1007,6 @@ int init_session(int fd, unsigned char *SPID, unsigned char user_id, unsigned ch
         memset(response, 0, sizeof(response));
         ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
 
-        for (int x = 0; x < 254; ++x) {
-            printf("%02x ", response[x]);
-        }
-        printf("\n");
 
         // SMUID.SyncSession [
         // HostSessionID : uinteger,
@@ -1146,67 +1148,81 @@ void setup_range(int fd, unsigned char locking_range_uid, unsigned char *challen
         printf("\n");
     }
 
-    if (rc == 0) {
-        // Retrieves the UID of the range’s media encryption key
-        printf("Sending Get LockingRange1:\n");
-        memset(buffer, 0, sizeof(buffer));
-        i = 0;
-        prepare_headers(buffer, &i, SPSessionID, HostSessionID);
-        locking_range_get(buffer, &i, locking_range_uid, LOCKING_TABLE_ACTIVE_KEY, LOCKING_TABLE_ACTIVE_KEY);
-        finish_headers(buffer, &i);
-        ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
+    // char correct_key = 0;
+    // if (rc == 0) {
+    //     printf("Retrieves the UID of the range’s media encryption key:\n");
+    //     memset(buffer, 0, sizeof(buffer));
+    //     i = 0;
+    //     prepare_headers(buffer, &i, SPSessionID, HostSessionID);
+    //     locking_range_get(buffer, &i, locking_range_uid, LOCKING_TABLE_ACTIVE_KEY, LOCKING_TABLE_ACTIVE_KEY);
+    //     finish_headers(buffer, &i);
+    //     ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
 
-        printf("Getting Get LockingRange1 Result:\n");
-        memset(response, 0, sizeof(response));
-        ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
+    //     memset(response, 0, sizeof(response));
+    //     ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
 
-        i = 0;
-        i += sizeof(struct HeadersStruct);
-        i += 1; // start list token
-        i += 1; // start list token
-        i += 1; // start name token
-        i += 1; // tiny atom token - name
-        i += 1; // short atom token - length 8
+    //     i = 0;
+    //     i += sizeof(struct HeadersStruct);
+    //     i += 1; // start list token
+    //     i += 1; // start list token
+    //     i += 1; // start name token
+    //     i += 1; // tiny atom token - name
+    //     i += 1; // short atom token - length 8
 
-        printf("found    %02x %02x %02x %02x %02x %02x %02x %02x\n", response[i + 0], response[i + 1], response[i + 2],
-               response[i + 3], response[i + 4], response[i + 5], response[i + 6], response[i + 7]);
-        printf("assuming 00 00 08 06 00 03 NN NN\n");
-        // 0c 00 00 f1 00 00 00 00
-        i += 8;
-        i += 1; // end name token
-        i += 1; // end list token
-        i += 1; // end list token
-        i += 1; // end of data token
-        // method status list
-        printf("method status code: %s (%i)\n", MSC_to_string(response[i + 1]), response[i + 1]);
-        printf("\n");
-    }
+    //     printf("found    %02x %02x %02x %02x %02x %02x %02x %02x\n", response[i + 0], response[i + 1], response[i + 2],
+    //            response[i + 3], response[i + 4], response[i + 5], response[i + 6], response[i + 7]);
+    //     printf("assuming 00 00 08 06 00 03 NN NN\n");
+    //     correct_key = response[i + 0] == 0x00 && response[i + 1] == 0x00 && response[i + 2] == 0x08 &&
+    //                   response[i + 3] == 0x06 && response[i + 4] == 0x00 && response[i + 5] == 0x03;
+    //     ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
+    //     for (int x = 0 ; x < 256; ++x) {
+    //         printf("%02x ", response[x]);
+    //     }
+    //     printf("\n");
+    //     // 0c 00 00 f1 00 00 00 00
+    //     i += 8;
+    //     i += 1; // end name token
+    //     i += 1; // end list token
+    //     i += 1; // end list token
+    //     i += 1; // end of data token
+    //     // method status list
+    //     printf("method status code: %s (%i)\n", MSC_to_string(response[i + 1]), response[i + 1]);
+    //     printf("\n");
+    // }
+    
+    // if (rc == 0 && !correct_key) {
 
-    if (rc == 0) {
-        // Performs a Secure Erase of the range
-        printf("Sending Genkey – K_AES_256_Range1_Key:\n");
-        memset(buffer, 0, sizeof(buffer));
-        i = 0;
-        prepare_headers(buffer, &i, SPSessionID, HostSessionID);
-        size_t j = i;
-        {
-            size_t *i = &j;
-            call_token(buffer, i);
-            short_atom(buffer, i, 1, "\x00\x00\x08\x06\x00\x03\x00\x01", 8);
-            short_atom(buffer, i, 1, "\x00\x00\x00\x06\x00\x00\x00\x10", 8);
-            start_list(buffer, i);
-            end_list(buffer, i);
-            end_of_data(buffer, i);
-            method_status_list(buffer, i);
-        }
-        i = j;
-        finish_headers(buffer, &i);
-        ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
+    // }
 
-        printf("Getting Genkey – K_AES_256_Range1_Key Result:\n");
-        memset(response, 0, sizeof(response));
-        ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
-    }
+    // if (rc == 0) {
+    //     // Performs a Secure Erase of the range
+    //     printf("Sending Genkey – K_AES_256_Range1_Key:\n");
+    //     memset(buffer, 0, sizeof(buffer));
+    //     i = 0;
+    //     prepare_headers(buffer, &i, SPSessionID, HostSessionID);
+    //     size_t j = i;
+    //     {
+    //         size_t *i = &j;
+    //         call_token(buffer, i);
+    //         short_atom(buffer, i, 1, "\x00\x00\x08\x06\x00\x03\x00\x01", 8);
+    //         short_atom(buffer, i, 1, "\x00\x00\x00\x06\x00\x00\x00\x10", 8);
+    //         start_list(buffer, i);
+    //         end_list(buffer, i);
+    //         end_of_data(buffer, i);
+    //         method_status_list(buffer, i);
+    //     }
+    //     i = j;
+    //     finish_headers(buffer, &i);
+    //     ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
+
+    //     printf("Getting Genkey – K_AES_256_Range1_Key Result:\n");
+    //     memset(response, 0, sizeof(response));
+    //     ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
+    //     for (int x = 0 ; x < 256; ++x) {
+    //         printf("%02x ", response[x]);
+    //     }
+    //     printf("\n");
+    // }
 
     if (rc == 0) {
         // Gives access to multiple users to read-unlock the range (User1 and User2)
@@ -1272,19 +1288,9 @@ void setup_range(int fd, unsigned char locking_range_uid, unsigned char *challen
         finish_headers(buffer, &i);
         ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
 
-        for (int x = 0; x < 254; ++x) {
-            printf("%02x ", buffer[x]);
-        }
-        printf("\n");
-
         printf("Getting ...:\n");
         memset(response, 0, sizeof(response));
         ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
-
-        for (int x = 0; x < 254; ++x) {
-            printf("%02x ", response[x]);
-        }
-        printf("\n");
     }
 
     if (rc == 0) {
@@ -1337,19 +1343,11 @@ void setup_user(int fd, int user_uid, unsigned char *admin_pin, int admin_pin_le
         prepare_headers(buffer, &i, SPSessionID, HostSessionID);
         user_pin_set(buffer, &i, user_uid, user_pin, user_pin_len);
         finish_headers(buffer, &i);
-        for (int x = 0; x < 256; x++) {
-            printf("%02x ", buffer[x]);
-        }
-        printf("\n");
         ata_trusted(fd, buffer, i, ATA_TRUSTED_SEND, 0x1, base_comID);
 
         printf("Getting Set User1 pin:\n");
         memset(response, 0, sizeof(response));
         ata_trusted(fd, response, sizeof(response), ATA_TRUSTED_RECEIVE, 0x1, base_comID);
-        for (int x = 0; x < 256; x++) {
-            printf("%02x ", response[x]);
-        }
-        printf("\n");
     }
 
     if (rc == 0) {
@@ -1516,8 +1514,8 @@ int main(int argc, char *argv[])
 
     if (arguments.command == CMD_IDENTIFY) {
         return nvme_identify(fd);
-    } else if (arguments.command == CMD_IDENTIFY) {
-        ata_discovery(fd);
+    } else if (arguments.command == CMD_DISCOVERY) {
+        ata_discovery(fd, 1);
     } else if (arguments.command == CMD_UNLOCK) {
         unlock_range(fd, arguments.locking_range, arguments.user, arguments.read_lock_enabled,
                      arguments.write_lock_enabled, arguments.read_locked, arguments.write_locked, arguments.verify_pin,
